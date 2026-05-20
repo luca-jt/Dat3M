@@ -96,7 +96,8 @@ public class ProgramEncoder {
                 encodeEventSemantics(),
                 encodeFinalRegisterValues(),
                 encodeFilter(),
-                encodeDependencies()
+                encodeDependencies(),
+                encodeDataValues()
         );
     }
 
@@ -515,6 +516,14 @@ public class ProgramEncoder {
                 }
             }
         }
+        return bmgr.and(enc);
+    }
+
+    // no idd-edges, just data values (test under sc.cat, tso.cat und rc11.cat)
+    public BooleanFormula encodeDataValues() {
+        logger.info("Encoding data values.");
+        List<BooleanFormula> enc = new ArrayList<>();
+
         return bmgr.and(enc);
     }
 

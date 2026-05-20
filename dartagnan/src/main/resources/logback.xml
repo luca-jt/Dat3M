@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    
+
     <property name="logDir" value="${DAT3M_OUTPUT:-output}"/>
     <property name="logFile" value="${LOGNAME:-dartagnan}"/>
 
@@ -18,7 +18,7 @@
         </encoder>
     </appender>
 
-    <root level="${logLevel:-WARN}">
+    <root level="${logLevel:-INFO}">
         <appender-ref ref="File"/>
         <appender-ref ref="Console"/>
     </root>
