@@ -96,7 +96,7 @@ public class ProgramEncoder {
                 encodeEventSemantics(),
                 encodeFinalRegisterValues(),
                 encodeFilter(),
-                encodeDependencies(),
+                //encodeDependencies()
                 encodeDataValues()
         );
     }
@@ -522,7 +522,31 @@ public class ProgramEncoder {
     // no idd-edges, just data values (test under sc.cat, tso.cat und rc11.cat)
     public BooleanFormula encodeDataValues() {
         logger.info("Encoding data values.");
+        //final ExpressionFactory exprs = ExpressionFactory.getInstance();
         List<BooleanFormula> enc = new ArrayList<>();
+
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                //final List<BooleanFormula> overwrite = new ArrayList<>();
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+
+                for (RegWriter writer : reverse(reg.getMayWriters())) {
+                    if (reg.getMustWriters().contains(writer)) {
+                        enc.add(exprEnc.assignEqualAt(register, reader, context.result(writer), writer));
+                        //enc.add(bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))));
+                    }
+                    //overwrite.add(context.execution(writer));
+                }
+
+                /*if(initializeRegisters && !reg.mustBeInitialized()) {
+                    final Expression zero = exprs.makeGeneralZero(register.getType());
+                    overwrite.add(bmgr.not(context.controlFlow(reader)));
+                    overwrite.add(exprEnc.assignEqualAt(register, reader, zero, reader));
+                    enc.add(bmgr.or(overwrite));
+                }*/
+            }
+        }
 
         return bmgr.and(enc);
     }
