@@ -97,6 +97,7 @@ public class ProgramEncoder {
                 encodeFinalRegisterValues(),
                 encodeFilter(),
                 //encodeDependencies()
+                //encodeDependenciesITE()
                 encodeDataValues()
         );
     }
@@ -503,7 +504,7 @@ public class ProgramEncoder {
                         edge = context.dependency(writer, reader);
                         enc.add(bmgr.equivalence(edge, bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)))));
                     }
-                    BooleanFormula equalValue = exprEnc.assignEqualAt(register, reader, context.result(writer), writer);
+                    final BooleanFormula equalValue = exprEnc.assignEqualAt(register, reader, context.result(writer), writer);
                     enc.add(bmgr.implication(edge, equalValue));
                     overwrite.add(context.execution(writer));
                 }
@@ -519,16 +520,71 @@ public class ProgramEncoder {
         return bmgr.and(enc);
     }
 
+    public BooleanFormula encodeDependenciesITE() {
+        logger.info("Encoding dependencies with ITE.");
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
+
+        List<BooleanFormula> enc = new ArrayList<>();
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                final List<BooleanFormula> overwrite = new ArrayList<>();
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+
+                ArrayList<RegWriter> potential_writers_rev = new ArrayList<>(reverse(reg.getMayWriters()));
+
+                // loop over the writers in revers order, if there is a must-writer, break and add the other ones after like to be not taken like with overwrite above. If there is an if-case, we can use ifthenelse, otherwhise if there is a single if, use an implication.
+                // TODO
+
+                if (potential_writers_rev.size() > 1) {
+                    RegWriter first_writer = potential_writers_rev.get(0);
+                    RegWriter second_writer = potential_writers_rev.get(1);
+                    BooleanFormula assignmentCase = bmgr.ifThenElse(
+                            context.execution(first_writer),
+                            exprEnc.assignEqualAt(register, reader, context.result(first_writer), first_writer),
+                            exprEnc.assignEqualAt(register, reader, context.result(second_writer), second_writer)
+                    );
+
+                    for (RegWriter potential_write : potential_writers_rev.subList(2, potential_writers_rev.size())) {
+                        assignmentCase = bmgr.ifThenElse(
+                                context.execution(potential_write),
+                                exprEnc.assignEqualAt(register, reader, context.result(potential_write), potential_write),
+                                assignmentCase
+                        );
+                    }
+                    enc.add(bmgr.implication(context.execution(reader), assignmentCase));
+                } else { // there is only a single must-writer
+                    assert potential_writers_rev.size() == 1;
+                    RegWriter must_writer = potential_writers_rev.get(0);
+                    assert reg.getMustWriters().contains(must_writer);
+                    exprEnc.assignEqualAt(register, reader, context.result(must_writer), must_writer);
+                }
+
+                if(initializeRegisters && !reg.mustBeInitialized()) {
+                    final Expression zero = exprs.makeGeneralZero(register.getType());
+                    overwrite.add(bmgr.not(context.controlFlow(reader)));
+                    overwrite.add(exprEnc.assignEqualAt(register, reader, zero, reader));
+                    enc.add(bmgr.or(overwrite));
+                }
+            }
+        }
+        return bmgr.and(enc);
+    }
+
+    /*
+    static idd edges: iterate over existing idd edges: if the rvalue of the assignment is not dependant on the source if the chain, one dependency variable for the blob that can be reordered
+    */
+
     // no idd-edges, just data values (test under sc.cat, tso.cat und rc11.cat)
     public BooleanFormula encodeDataValues() {
         logger.info("Encoding data values.");
-        //final ExpressionFactory exprs = ExpressionFactory.getInstance();
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
         List<BooleanFormula> enc = new ArrayList<>();
 
         for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
             for (Register register : writers.getUsedRegisters()) {
-                //final List<BooleanFormula> overwrite = new ArrayList<>();
+                final List<BooleanFormula> overwrite = new ArrayList<>();
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
 
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
@@ -536,15 +592,15 @@ public class ProgramEncoder {
                         enc.add(exprEnc.assignEqualAt(register, reader, context.result(writer), writer));
                         //enc.add(bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))));
                     }
-                    //overwrite.add(context.execution(writer));
+                    overwrite.add(context.execution(writer));
                 }
 
-                /*if(initializeRegisters && !reg.mustBeInitialized()) {
+                if(initializeRegisters && !reg.mustBeInitialized()) {
                     final Expression zero = exprs.makeGeneralZero(register.getType());
                     overwrite.add(bmgr.not(context.controlFlow(reader)));
                     overwrite.add(exprEnc.assignEqualAt(register, reader, zero, reader));
                     enc.add(bmgr.or(overwrite));
-                }*/
+                }
             }
         }
 

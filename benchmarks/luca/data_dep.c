@@ -4,24 +4,18 @@
 static int global = 42;
 
 int main() {
-    int *ref = &global;
+    int dep = global;
 
     int case_distinction;
     int other = __VERIFIER_nondet_int();
 
     if (__VERIFIER_nondet_bool()) {
-        case_distinction = *ref * 0;
+        case_distinction = dep * (dep - dep);
     } else {
-        case_distinction = 69;
+        case_distinction = 0;
     }
 
-    int phi = (case_distinction + case_distinction) / 2;
+    global = (case_distinction + case_distinction) / 2;
 
-    int first_use = other + 3 * phi;
-    int second_use = other + 4 * phi;
-
-    int y = *ref;
-
-    assert(y == 42);
-    assert(first_use == second_use - phi);
+    assert(global == 0);
 }
