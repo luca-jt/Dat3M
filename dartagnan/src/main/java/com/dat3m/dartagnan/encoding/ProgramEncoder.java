@@ -96,8 +96,8 @@ public class ProgramEncoder {
                 encodeEventSemantics(),
                 encodeFinalRegisterValues(),
                 encodeFilter(),
-                encodeDependencies()
-                //encodeDependenciesITE()
+                //encodeDependencies()
+                encodeDependenciesITE()
                 //encodeDataValues()
         );
     }
@@ -534,10 +534,20 @@ public class ProgramEncoder {
                 ArrayList<RegWriter> potential_writers = new ArrayList<>(reg.getMayWriters());
 
                 // loop over the writers in revers order, if there is a must-writer, break and add the other ones after like to be not taken like with overwrite above. If there is an if-case, we can use ifthenelse, otherwhise if there is a single if, use an implication.
+                int index_of_first_must_writer = -1;
+                for (int i = potential_writers.size() - 1; i >= 0; i--) {
+                    if (reg.getMustWriters().contains(potential_writers.get(i))) {
+                        index_of_first_must_writer = i;
+                        break;
+                    }
+                }
+                if (index_of_first_must_writer > 0) {
+                    potential_writers.subList(0, index_of_first_must_writer).clear();
+                }
 
                 while (potential_writers.size() > 1) {
                     RegWriter potential_writer = potential_writers.get(potential_writers.size() - 1);
-                    assert !reg.getMustWriters().contains(potential_writer);
+                    //assert !reg.getMustWriters().contains(potential_writer);
                     ArrayList<RegWriter> case_writer_chunk = new ArrayList<>();
                     case_writer_chunk.add(potential_writer);
 
