@@ -96,9 +96,9 @@ public class ProgramEncoder {
                 encodeEventSemantics(),
                 encodeFinalRegisterValues(),
                 encodeFilter(),
-                //encodeDependencies()
+                encodeDependencies()
                 //encodeDependenciesITE()
-                encodeDataValues()
+                //encodeDataValues()
         );
     }
 
@@ -531,34 +531,55 @@ public class ProgramEncoder {
                 final List<BooleanFormula> overwrite = new ArrayList<>();
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
 
-                ArrayList<RegWriter> potential_writers_rev = new ArrayList<>(reverse(reg.getMayWriters()));
+                ArrayList<RegWriter> potential_writers = new ArrayList<>(reg.getMayWriters());
 
                 // loop over the writers in revers order, if there is a must-writer, break and add the other ones after like to be not taken like with overwrite above. If there is an if-case, we can use ifthenelse, otherwhise if there is a single if, use an implication.
-                // TODO
 
-                if (potential_writers_rev.size() > 1) {
-                    RegWriter first_writer = potential_writers_rev.get(0);
-                    RegWriter second_writer = potential_writers_rev.get(1);
-                    BooleanFormula assignmentCase = bmgr.ifThenElse(
-                            context.execution(first_writer),
-                            exprEnc.assignEqualAt(register, reader, context.result(first_writer), first_writer),
-                            exprEnc.assignEqualAt(register, reader, context.result(second_writer), second_writer)
-                    );
+                while (potential_writers.size() > 1) {
+                    RegWriter potential_writer = potential_writers.get(potential_writers.size() - 1);
+                    assert !reg.getMustWriters().contains(potential_writer);
+                    ArrayList<RegWriter> case_writer_chunk = new ArrayList<>();
+                    case_writer_chunk.add(potential_writer);
 
-                    for (RegWriter potential_write : potential_writers_rev.subList(2, potential_writers_rev.size())) {
-                        assignmentCase = bmgr.ifThenElse(
-                                context.execution(potential_write),
-                                exprEnc.assignEqualAt(register, reader, context.result(potential_write), potential_write),
-                                assignmentCase
-                        );
+                    outer: for (RegWriter potential_case_member : reverse(potential_writers.subList(0, potential_writers.size() - 1))) {
+                        if (reg.getMustWriters().contains(potential_case_member)) {
+                            break; // this should leave at least one in the end
+                        }
+
+                        for (RegWriter existing_writer : case_writer_chunk) {
+                            if (!exec.areMutuallyExclusive(potential_case_member, existing_writer)) {
+                                break outer;
+                            }
+                        }
+                        case_writer_chunk.add(potential_case_member);
                     }
-                    enc.add(bmgr.implication(context.execution(reader), assignmentCase));
-                } else { // there is only a single must-writer
-                    assert potential_writers_rev.size() == 1;
-                    RegWriter must_writer = potential_writers_rev.get(0);
-                    assert reg.getMustWriters().contains(must_writer);
-                    exprEnc.assignEqualAt(register, reader, context.result(must_writer), must_writer);
+
+                    for (int i = 0; i < case_writer_chunk.size(); i++) {
+                        potential_writers.remove(potential_writers.size() - 1);
+                    }
+
+                    {
+                        RegWriter first_writer = case_writer_chunk.get(0);
+                        BooleanFormula assignmentCase = exprEnc.assignEqualAt(register, reader, context.result(first_writer), first_writer);
+
+                        for (RegWriter potential_write : case_writer_chunk.subList(1, case_writer_chunk.size())) {
+                            assignmentCase = bmgr.ifThenElse(
+                                    context.execution(potential_write),
+                                    exprEnc.assignEqualAt(register, reader, context.result(potential_write), potential_write),
+                                    assignmentCase
+                            );
+                        }
+
+                        enc.add(bmgr.implication(bmgr.and(context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))), assignmentCase));
+                    }
+
+                    overwrite.add(bmgr.or(case_writer_chunk.stream().map(context::execution).toList()));
                 }
+
+                // now only a single must-writer is remaining
+                RegWriter must_writer = potential_writers.get(0);
+                assert reg.getMustWriters().contains(must_writer);
+                enc.add(exprEnc.assignEqualAt(register, reader, context.result(must_writer), must_writer));
 
                 if(initializeRegisters && !reg.mustBeInitialized()) {
                     final Expression zero = exprs.makeGeneralZero(register.getType());
