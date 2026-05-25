@@ -97,8 +97,8 @@ public class ProgramEncoder {
                 encodeFinalRegisterValues(),
                 encodeFilter(),
                 //encodeDependencies()
-                encodeDependenciesITE()
-                //encodeDataValues()
+                //encodeDependenciesITE()
+                encodeDataValues()
         );
     }
 
@@ -509,7 +509,7 @@ public class ProgramEncoder {
                     overwrite.add(context.execution(writer));
                 }
 
-                if(initializeRegisters && !reg.mustBeInitialized()) {
+                if (initializeRegisters && !reg.mustBeInitialized()) {
                     final Expression zero = exprs.makeGeneralZero(register.getType());
                     overwrite.add(bmgr.not(context.controlFlow(reader)));
                     overwrite.add(exprEnc.assignEqualAt(register, reader, zero, reader));
@@ -534,6 +534,7 @@ public class ProgramEncoder {
                 ArrayList<RegWriter> potential_writers = new ArrayList<>(reg.getMayWriters());
 
                 // loop over the writers in revers order, if there is a must-writer, break and add the other ones after like to be not taken like with overwrite above. If there is an if-case, we can use ifthenelse, otherwhise if there is a single if, use an implication.
+
                 int index_of_first_must_writer = -1;
                 for (int i = potential_writers.size() - 1; i >= 0; i--) {
                     if (reg.getMustWriters().contains(potential_writers.get(i))) {
@@ -591,7 +592,7 @@ public class ProgramEncoder {
                 assert reg.getMustWriters().contains(must_writer);
                 enc.add(exprEnc.assignEqualAt(register, reader, context.result(must_writer), must_writer));
 
-                if(initializeRegisters && !reg.mustBeInitialized()) {
+                if (initializeRegisters && !reg.mustBeInitialized()) {
                     final Expression zero = exprs.makeGeneralZero(register.getType());
                     overwrite.add(bmgr.not(context.controlFlow(reader)));
                     overwrite.add(exprEnc.assignEqualAt(register, reader, zero, reader));
@@ -619,14 +620,23 @@ public class ProgramEncoder {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
 
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
+                    BooleanFormula edge;
                     if (reg.getMustWriters().contains(writer)) {
-                        enc.add(exprEnc.assignEqualAt(register, reader, context.result(writer), writer));
-                        //enc.add(bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))));
+                        if (exec.isImplied(reader, writer) && reader.cfImpliesExec()) {
+                            assert reg.getMayWriters().size() == 1;
+                            edge = bmgr.makeTrue();
+                        } else {
+                            edge = bmgr.and(context.execution(writer), context.controlFlow(reader));
+                        }
+                    } else {
+                        edge = bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)));
                     }
+                    final BooleanFormula equalValue = exprEnc.assignEqualAt(register, reader, context.result(writer), writer);
+                    enc.add(bmgr.implication(edge, equalValue));
                     overwrite.add(context.execution(writer));
                 }
 
-                if(initializeRegisters && !reg.mustBeInitialized()) {
+                if (initializeRegisters && !reg.mustBeInitialized()) {
                     final Expression zero = exprs.makeGeneralZero(register.getType());
                     overwrite.add(bmgr.not(context.controlFlow(reader)));
                     overwrite.add(exprEnc.assignEqualAt(register, reader, zero, reader));

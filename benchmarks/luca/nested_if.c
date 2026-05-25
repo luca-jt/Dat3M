@@ -11,8 +11,13 @@ int main() {
 
     if (__VERIFIER_nondet_bool()) {
         case_distinction = dep * (dep - dep);
-    } else {
+    } else if (__VERIFIER_nondet_bool()) {
         case_distinction = 0;
+        if (__VERIFIER_nondet_bool()) {
+            case_distinction = 69 * (dep - dep);
+        }
+    } else {
+        case_distinction = dep - dep;
     }
 
     global2 = (case_distinction + case_distinction) / 2;

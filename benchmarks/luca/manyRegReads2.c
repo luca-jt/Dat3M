@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <dat3m.h>
 
-#define N 100
+#define N 10
 
 int main()
 {
