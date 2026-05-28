@@ -1,5 +1,6 @@
 package com.dat3m.dartagnan.encoding;
 
+import ap.theories.ADT;
 import com.dat3m.dartagnan.configuration.ProgressModel;
 import com.dat3m.dartagnan.expression.Expression;
 import com.dat3m.dartagnan.expression.ExpressionFactory;
@@ -95,8 +96,7 @@ public class ProgramEncoder {
                 encodeFinalRegisterValues(),
                 encodeFilter(),
                 //encodeDependencies()
-                //encodeDependenciesITE()
-                encodeDataValues()
+                encodeDataFlow()
         );
     }
 
@@ -500,6 +500,7 @@ public class ProgramEncoder {
         return bmgr.and(enc);
     }
 
+    /*
     public BooleanFormula encodeDependenciesITE() {
         logger.info("Encoding dependencies with ITE.");
         final ExpressionFactory exprs = ExpressionFactory.getInstance();
@@ -581,38 +582,40 @@ public class ProgramEncoder {
             }
         }
         return bmgr.and(enc);
+    }*/
+
+    public BooleanFormula encodeDataFlow() {
+        logger.info("Encoding data flow.");
+
+        final BooleanFormula data_value_formula = encodeDataValues();
+        final BooleanFormula dependency_formula = encodeDataDependencies();
+
+        return bmgr.and(data_value_formula, dependency_formula);
     }
 
-    /*
-    static idd edges: iterate over existing idd edges: if the rvalue of the assignment is not dependant on the source if the chain, one dependency variable for the blob that can be reordered
-    */
-
-    // no idd-edges, just data values (test under sc.cat, tso.cat und rc11.cat)
     public BooleanFormula encodeDataValues() {
         logger.info("Encoding data values.");
-        final ExpressionFactory exprs = ExpressionFactory.getInstance();
-        List<BooleanFormula> enc = new ArrayList<>();
 
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
+
+        List<BooleanFormula> enc = new ArrayList<>();
         for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
             for (Register register : writers.getUsedRegisters()) {
                 final List<BooleanFormula> overwrite = new ArrayList<>();
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
-
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    BooleanFormula edge;
+                    final BooleanFormula equalValue = exprEnc.assignEqualAt(register, reader, context.result(writer), writer);
                     if (reg.getMustWriters().contains(writer)) {
                         if (exec.isImplied(reader, writer) && reader.cfImpliesExec()) {
                             assert reg.getMayWriters().size() == 1;
-                            edge = bmgr.makeTrue();
+                            enc.add(equalValue);
                         } else {
-                            edge = bmgr.and(context.execution(writer), context.controlFlow(reader));
+                            enc.add(bmgr.implication(bmgr.and(context.execution(writer), context.controlFlow(reader)), equalValue));
                         }
                     } else {
-                        edge = bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)));
+                        enc.add(bmgr.implication(bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))), equalValue));
                     }
-                    final BooleanFormula equalValue = exprEnc.assignEqualAt(register, reader, context.result(writer), writer);
-                    enc.add(bmgr.implication(edge, equalValue));
                     overwrite.add(context.execution(writer));
                 }
 
@@ -624,7 +627,27 @@ public class ProgramEncoder {
                 }
             }
         }
+        return bmgr.and(enc);
+    }
 
+    public BooleanFormula encodeDataDependencies() {
+        logger.info("Encoding data dependencies.");
+
+        List<BooleanFormula> enc = new ArrayList<>();
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                final List<BooleanFormula> overwrite = new ArrayList<>();
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                for (RegWriter writer : reverse(reg.getMayWriters())) {
+                    if (!reg.getMustWriters().contains(writer)) {
+                        final BooleanFormula edge = context.dependency(writer, reader);
+                        enc.add(bmgr.equivalence(edge, bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)))));
+                    }
+                    overwrite.add(context.execution(writer));
+                }
+            }
+        }
         return bmgr.and(enc);
     }
 

@@ -36,6 +36,6 @@ public class LitmusAARCH64Test extends AbstractLitmusTest {
     @Override
     protected ConfigurationBuilder additionalConfig(ConfigurationBuilder builder) {
         return builder
-                .setOption(MIXED_SIZE, String.valueOf(filePathProvider.get().contains("litmus/AARCH64/mixed/")));
+                .setOption(MIXED_SIZE, String.valueOf(filePathProvider.get().contains("litmus\\AARCH64\\mixed\\")));
     }
 }
