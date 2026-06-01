@@ -516,8 +516,6 @@ public class ProgramEncoder {
         return bmgr.and(data_value_formula, dependency_formula);
     }
 
-    record IDD_Edge(RegWriter def, RegReader reader) {}
-
     public BooleanFormula encodeDataValues() {
         logger.info("Encoding data values.");
 
@@ -577,6 +575,10 @@ public class ProgramEncoder {
             }
         }
 
+        if (visited_events.isEmpty()) {
+            return bmgr.makeTrue();
+        }
+
         final var reverse_map = edges_to_encode.getInMap();
         List<BooleanFormula> enc = new ArrayList<>();
         final ExpressionFactory exprs = ExpressionFactory.getInstance();
@@ -587,8 +589,11 @@ public class ProgramEncoder {
             }
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
 
+            final var writers_from_map = reverse_map.get(reader);
+            if (writers_from_map == null) continue; // TODO: exclude cases where this is important in another way?
+
             LinkedHashMap<Register, LinkedHashSet<RegWriter>> used_registers = new LinkedHashMap<>();
-            final var other_borders = reverse_map.get(reader).stream().sorted(Comparator.reverseOrder()).toList(); // reverse program order
+            final var other_borders = writers_from_map.stream().sorted(Comparator.reverseOrder()).toList(); // reverse program order
             for (Event border : other_borders) {
                 final RegWriter casted = (RegWriter) border; // cast is fine here
                 var writer_set = used_registers.computeIfAbsent(casted.getResultRegister(), r -> new LinkedHashSet<>());
@@ -623,11 +628,14 @@ public class ProgramEncoder {
         if (isPossibleCunkBorder(start)) {
             ArrayList<Event> existing_path = new ArrayList<>();
             final var path_found = transitiveEdgeWithoutVisibleEventExistsBetween(existing_path, start, end_border);
-            if (path_found) {
+            if (existing_path.size() > 2) {
+                assert path_found;
                 for (List<Event> edge : slidingWindow(existing_path, 2).toList()) {
                     final var removed = edges_to_encode.remove(edge.get(1), edge.get(0)); // returned list is in reverse order
                     assert removed;
                 }
+            }
+            if (!path_found) {
                 edges_to_encode.add(start, end_border);
             }
 
@@ -638,7 +646,7 @@ public class ProgramEncoder {
         }
 
         if (start instanceof RegReader reader) {
-            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader); // TODO: in the end this code duplication could be removed
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
@@ -649,12 +657,12 @@ public class ProgramEncoder {
     }
 
     private boolean transitiveEdgeWithoutVisibleEventExistsBetween(ArrayList<Event> transitive, Event from, Event to) {
+        if (from.equals(to)) {
+            transitive.add(to);
+            return true;
+        }
         for (Event child : edges_to_encode.getRange(from)) {
-            if (child.equals(to)) {
-                transitive.add(to);
-                return true;
-            }
-            if (isPossibleCunkBorder(child)) {
+            if (isPossibleCunkBorder(child) && !child.equals(to)) {
                 return false;
             }
             final var edge_found = transitiveEdgeWithoutVisibleEventExistsBetween(transitive, child, to);

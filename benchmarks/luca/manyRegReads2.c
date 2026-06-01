@@ -1,15 +1,18 @@
 #include <assert.h>
 #include <dat3m.h>
 
-#define N 10
+#define N 80
+
+static int global = 0;
 
 int main()
 {
-    int r1 = 0;
+    int r1 = global;
     for (int i = 0; i < N+1; i++) {
         if (__VERIFIER_nondet_bool()) {
-            r1 += i;
+            break;
         }
+        r1 += i;
     }
 
     //int temp = (r1 + r1) / 2;
@@ -17,10 +20,13 @@ int main()
     int r2 = 0;
     for (int i = 0; i < N; i++) {
         if (__VERIFIER_nondet_bool()) {
-            r2 += r1;
-            //r2 += temp;
+            break;
         }
+        r2 += r1;
+        //r2 += temp;
     }
 
-    assert(r2 <= N*(N*(N+1))/2);
+    global = r2;
+
+    assert(global <= N*(N*(N+1))/2);
 }
