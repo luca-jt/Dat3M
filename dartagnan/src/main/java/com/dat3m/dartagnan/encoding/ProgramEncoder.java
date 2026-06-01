@@ -21,6 +21,7 @@ import com.dat3m.dartagnan.program.memory.Memory;
 import com.dat3m.dartagnan.program.memory.MemoryObject;
 import com.dat3m.dartagnan.program.misc.NonDetValue;
 import com.dat3m.dartagnan.verification.Context;
+import com.dat3m.dartagnan.wmm.utils.graph.mutable.MapEventGraph;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
@@ -35,6 +36,8 @@ import org.sosy_lab.java_smt.api.*;
 import java.math.BigInteger;
 import java.util.*;
 import java.util.function.BiFunction;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static com.dat3m.dartagnan.configuration.OptionNames.IGNORE_FILTER_SPECIFICATION;
 import static com.dat3m.dartagnan.configuration.OptionNames.INITIALIZE_REGISTERS;
@@ -68,8 +71,7 @@ public class ProgramEncoder {
     private final BooleanFormulaManager bmgr;
     private final ExpressionEncoder exprEnc;
 
-    private final HashMap<RegisterDefinition, ArrayList<RegReader>> def_use_edges;
-    private final HashMap<RegReader, ArrayList<RegisterDefinition>> use_def_edges;
+    private MapEventGraph edges_to_encode = new MapEventGraph();
 
     private ProgramEncoder(EncodingContext c) {
         Preconditions.checkArgument(c.getTask().getProgram().isCompiled(), "The program must be compiled before encoding.");
@@ -80,23 +82,7 @@ public class ProgramEncoder {
         this.bmgr = context.getBooleanFormulaManager();
         this.exprEnc = context.getExpressionEncoder();
 
-        this.def_use_edges = new HashMap<>();
-        this.use_def_edges = new HashMap<>();
-
-        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
-            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
-            ArrayList<RegisterDefinition> defs = use_def_edges.getOrDefault(reader, new ArrayList<>());
-
-            for (Register register : writers.getUsedRegisters()) {
-                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
-                for (RegWriter writer : reg.getMayWriters()) {
-                    RegisterDefinition definition = new RegisterDefinition(writer, register);
-                    defs.add(definition);
-                    ArrayList<RegReader> readers = def_use_edges.getOrDefault(definition, new ArrayList<>());
-                    readers.add(reader);
-                }
-            }
-        }
+        this.edges_to_encode = new MapEventGraph();
     }
 
     public static ProgramEncoder withContext(EncodingContext context) throws InvalidConfigurationException {
@@ -530,8 +516,7 @@ public class ProgramEncoder {
         return bmgr.and(data_value_formula, dependency_formula);
     }
 
-    record RegisterDefinition(RegWriter writer, Register register) {} // TODO: not necessary because be can just always use .getResultRegister()?
-    record IDD_Edge(RegisterDefinition def, RegReader reader) {}
+    record IDD_Edge(RegWriter def, RegReader reader) {}
 
     public BooleanFormula encodeDataValues() {
         logger.info("Encoding data values.");
@@ -572,9 +557,7 @@ public class ProgramEncoder {
 
     public BooleanFormula encodeDataDependencies() {
         logger.info("Encoding data dependencies.");
-
         HashSet<Event> visited_events = new HashSet<>();
-        HashMap<RegisterDefinition, HashSet<RegReader>> edges_to_encode = new HashMap<>();
 
         for (RegReader possible_sink : reverse(context.getTask().getProgram().getThreadEvents(RegReader.class))) {
             if (!isPossibleCunkBorder(possible_sink)) {
@@ -589,58 +572,103 @@ public class ProgramEncoder {
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    RegisterDefinition def = new RegisterDefinition(writer, register);
-                    addDependencyEdge(def, possible_sink, visited_events, edges_to_encode);
+                    addDependencyEdge(writer, possible_sink, visited_events);
                 }
             }
         }
 
-        ArrayList<IDD_Edge> sorted_edges = new ArrayList<>(
-                edges_to_encode
-                        .entrySet()
-                        .stream()
-                        .flatMap(e -> e.getValue().stream().map(r -> new IDD_Edge(e.getKey(), r)))
-                        .toList()
-        );
-        sorted_edges.sort((e1, e2) -> e2.reader.compareTo(e1.reader)); // reverse
+        final var reverse_map = edges_to_encode.getInMap();
         List<BooleanFormula> enc = new ArrayList<>();
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
 
-        for (IDD_Edge edge : sorted_edges) {
-            // TODO: respect the overwrites
-            enc.add(bmgr.equivalence(context.dependency(edge.def.writer, edge.reader), bmgr.and(context.execution(edge.def.writer), context.controlFlow(edge.reader))));
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            if (!isPossibleCunkBorder(reader)) {
+                continue;
+            }
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+
+            LinkedHashMap<Register, LinkedHashSet<RegWriter>> used_registers = new LinkedHashMap<>();
+            final var other_borders = reverse_map.get(reader).stream().sorted(Comparator.reverseOrder()).toList(); // reverse program order
+            for (Event border : other_borders) {
+                final RegWriter casted = (RegWriter) border; // cast is fine here
+                var writer_set = used_registers.computeIfAbsent(casted.getResultRegister(), r -> new LinkedHashSet<>());
+                writer_set.add(casted);
+            }
+
+            for (var entry : used_registers.entrySet()) {
+                final List<BooleanFormula> overwrite = new ArrayList<>();
+                final var register = entry.getKey();
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+
+                for (RegWriter writer : entry.getValue()) {
+                    enc.add(bmgr.equivalence(context.dependency(writer, reader), bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)))));
+                    overwrite.add(context.execution(writer));
+                }
+
+                if (initializeRegisters && !reg.mustBeInitialized()) {
+                    final Expression zero = exprs.makeGeneralZero(register.getType());
+                    overwrite.add(bmgr.not(context.controlFlow(reader)));
+                    overwrite.add(exprEnc.assignEqualAt(register, reader, zero, reader));
+                    enc.add(bmgr.or(overwrite));
+                }
+            }
         }
+
         return bmgr.and(enc);
     }
 
-    private void addDependencyEdge(RegisterDefinition start, RegReader end_border, HashSet<Event> visited_events, HashMap<RegisterDefinition, HashSet<RegReader>> edges_to_encode) {
-        // TODO: we need some kind of graph structure to be able to check for edges
-
-        // does this edge enable a simplification based on the existing edges from the current memory visible event that the recursive call chain was started from and the end reader of this call?
-        // that is only possible if there is no memory visible event on both paths and start and end are visible!
-        // if yes, merge the two paths
-        // if no, add the new edge if the new edge leads to a visible event
-
+    private void addDependencyEdge(RegWriter start, RegReader end_border, HashSet<Event> visited_events) {
         RegReader new_end_border = end_border;
 
-        if (isPossibleCunkBorder(start.writer)) {
-            // TODO: above
+        if (isPossibleCunkBorder(start)) {
+            ArrayList<Event> existing_path = new ArrayList<>();
+            final var path_found = transitiveEdgeWithoutVisibleEventExistsBetween(existing_path, start, end_border);
+            if (path_found) {
+                for (List<Event> edge : slidingWindow(existing_path, 2).toList()) {
+                    final var removed = edges_to_encode.remove(edge.get(1), edge.get(0)); // returned list is in reverse order
+                    assert removed;
+                }
+                edges_to_encode.add(start, end_border);
+            }
 
-            if (start.writer instanceof RegReader reader) {
+            if (start instanceof RegReader reader) {
                 new_end_border = reader;
             }
-            visited_events.add(start.writer);
+            visited_events.add(start);
         }
 
-        if (start.writer instanceof RegReader reader) {
+        if (start instanceof RegReader reader) {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader); // TODO: in the end this code duplication could be removed
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    RegisterDefinition def = new RegisterDefinition(writer, register);
-                    addDependencyEdge(def, new_end_border, visited_events, edges_to_encode);
+                    addDependencyEdge(writer, new_end_border, visited_events);
                 }
             }
         }
+    }
+
+    private boolean transitiveEdgeWithoutVisibleEventExistsBetween(ArrayList<Event> transitive, Event from, Event to) {
+        for (Event child : edges_to_encode.getRange(from)) {
+            if (child.equals(to)) {
+                transitive.add(to);
+                return true;
+            }
+            if (isPossibleCunkBorder(child)) {
+                return false;
+            }
+            final var edge_found = transitiveEdgeWithoutVisibleEventExistsBetween(transitive, child, to);
+            if (edge_found) {
+                transitive.add(from);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static <T> Stream<List<T>> slidingWindow(List<T> list, int size) {
+        if (size > list.size()) return Stream.empty();
+        return IntStream.range(0, list.size()-size+1).mapToObj(start -> list.subList(start, start+size));
     }
 
     private boolean isPossibleCunkBorder(Event event) {
