@@ -68,6 +68,9 @@ public class ProgramEncoder {
     private final BooleanFormulaManager bmgr;
     private final ExpressionEncoder exprEnc;
 
+    private final HashMap<RegisterDefinition, ArrayList<RegReader>> def_use_edges;
+    private final HashMap<RegReader, ArrayList<RegisterDefinition>> use_def_edges;
+
     private ProgramEncoder(EncodingContext c) {
         Preconditions.checkArgument(c.getTask().getProgram().isCompiled(), "The program must be compiled before encoding.");
         context = c;
@@ -76,6 +79,24 @@ public class ProgramEncoder {
         this.definitions = c.getAnalysisContext().requires(ReachingDefinitionsAnalysis.class);
         this.bmgr = context.getBooleanFormulaManager();
         this.exprEnc = context.getExpressionEncoder();
+
+        this.def_use_edges = new HashMap<>();
+        this.use_def_edges = new HashMap<>();
+
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            ArrayList<RegisterDefinition> defs = use_def_edges.getOrDefault(reader, new ArrayList<>());
+
+            for (Register register : writers.getUsedRegisters()) {
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                for (RegWriter writer : reg.getMayWriters()) {
+                    RegisterDefinition definition = new RegisterDefinition(writer, register);
+                    defs.add(definition);
+                    ArrayList<RegReader> readers = def_use_edges.getOrDefault(definition, new ArrayList<>());
+                    readers.add(reader);
+                }
+            }
+        }
     }
 
     public static ProgramEncoder withContext(EncodingContext context) throws InvalidConfigurationException {
@@ -500,90 +521,6 @@ public class ProgramEncoder {
         return bmgr.and(enc);
     }
 
-    /*
-    public BooleanFormula encodeDependenciesITE() {
-        logger.info("Encoding dependencies with ITE.");
-        final ExpressionFactory exprs = ExpressionFactory.getInstance();
-
-        List<BooleanFormula> enc = new ArrayList<>();
-        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
-            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
-            for (Register register : writers.getUsedRegisters()) {
-                final List<BooleanFormula> overwrite = new ArrayList<>();
-                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
-
-                ArrayList<RegWriter> potential_writers = new ArrayList<>(reg.getMayWriters());
-
-                // loop over the writers in revers order, if there is a must-writer, break and add the other ones after like to be not taken like with overwrite above. If there is an if-case, we can use ifthenelse, otherwhise if there is a single if, use an implication.
-
-                int index_of_first_must_writer = -1;
-                for (int i = potential_writers.size() - 1; i >= 0; i--) {
-                    if (reg.getMustWriters().contains(potential_writers.get(i))) {
-                        index_of_first_must_writer = i;
-                        break;
-                    }
-                }
-                if (index_of_first_must_writer > 0) {
-                    potential_writers.subList(0, index_of_first_must_writer).clear();
-                }
-
-                while (potential_writers.size() > 1) {
-                    RegWriter potential_writer = potential_writers.get(potential_writers.size() - 1);
-                    //assert !reg.getMustWriters().contains(potential_writer);
-                    ArrayList<RegWriter> case_writer_chunk = new ArrayList<>();
-                    case_writer_chunk.add(potential_writer);
-
-                    outer: for (RegWriter potential_case_member : reverse(potential_writers.subList(0, potential_writers.size() - 1))) {
-                        if (reg.getMustWriters().contains(potential_case_member)) {
-                            break; // this should leave at least one in the end
-                        }
-
-                        for (RegWriter existing_writer : case_writer_chunk) {
-                            if (!exec.areMutuallyExclusive(potential_case_member, existing_writer)) {
-                                break outer;
-                            }
-                        }
-                        case_writer_chunk.add(potential_case_member);
-                    }
-
-                    for (int i = 0; i < case_writer_chunk.size(); i++) {
-                        potential_writers.remove(potential_writers.size() - 1);
-                    }
-
-                    {
-                        RegWriter first_writer = case_writer_chunk.get(0);
-                        BooleanFormula assignmentCase = exprEnc.assignEqualAt(register, reader, context.result(first_writer), first_writer);
-
-                        for (RegWriter potential_write : case_writer_chunk.subList(1, case_writer_chunk.size())) {
-                            assignmentCase = bmgr.ifThenElse(
-                                    context.execution(potential_write),
-                                    exprEnc.assignEqualAt(register, reader, context.result(potential_write), potential_write),
-                                    assignmentCase
-                            );
-                        }
-
-                        enc.add(bmgr.implication(bmgr.and(context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))), assignmentCase));
-                    }
-
-                    overwrite.add(bmgr.or(case_writer_chunk.stream().map(context::execution).toList()));
-                }
-
-                // now only a single must-writer is remaining
-                RegWriter must_writer = potential_writers.get(0);
-                assert reg.getMustWriters().contains(must_writer);
-                enc.add(exprEnc.assignEqualAt(register, reader, context.result(must_writer), must_writer));
-
-                if (initializeRegisters && !reg.mustBeInitialized()) {
-                    final Expression zero = exprs.makeGeneralZero(register.getType());
-                    overwrite.add(bmgr.not(context.controlFlow(reader)));
-                    overwrite.add(exprEnc.assignEqualAt(register, reader, zero, reader));
-                    enc.add(bmgr.or(overwrite));
-                }
-            }
-        }
-        return bmgr.and(enc);
-    }*/
-
     public BooleanFormula encodeDataFlow() {
         logger.info("Encoding data flow.");
 
@@ -592,6 +529,9 @@ public class ProgramEncoder {
 
         return bmgr.and(data_value_formula, dependency_formula);
     }
+
+    record RegisterDefinition(RegWriter writer, Register register) {} // TODO: not necessary because be can just always use .getResultRegister()?
+    record IDD_Edge(RegisterDefinition def, RegReader reader) {}
 
     public BooleanFormula encodeDataValues() {
         logger.info("Encoding data values.");
@@ -633,22 +573,78 @@ public class ProgramEncoder {
     public BooleanFormula encodeDataDependencies() {
         logger.info("Encoding data dependencies.");
 
-        List<BooleanFormula> enc = new ArrayList<>();
-        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
-            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+        HashSet<Event> visited_events = new HashSet<>();
+        HashMap<RegisterDefinition, HashSet<RegReader>> edges_to_encode = new HashMap<>();
+
+        for (RegReader possible_sink : reverse(context.getTask().getProgram().getThreadEvents(RegReader.class))) {
+            if (!isPossibleCunkBorder(possible_sink)) {
+                continue;
+            }
+            if (visited_events.contains(possible_sink)) {
+                continue;
+            }
+            visited_events.add(possible_sink);
+
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(possible_sink);
             for (Register register : writers.getUsedRegisters()) {
-                final List<BooleanFormula> overwrite = new ArrayList<>();
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    if (!reg.getMustWriters().contains(writer)) {
-                        final BooleanFormula edge = context.dependency(writer, reader);
-                        enc.add(bmgr.equivalence(edge, bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)))));
-                    }
-                    overwrite.add(context.execution(writer));
+                    RegisterDefinition def = new RegisterDefinition(writer, register);
+                    addDependencyEdge(def, possible_sink, visited_events, edges_to_encode);
                 }
             }
         }
+
+        ArrayList<IDD_Edge> sorted_edges = new ArrayList<>(
+                edges_to_encode
+                        .entrySet()
+                        .stream()
+                        .flatMap(e -> e.getValue().stream().map(r -> new IDD_Edge(e.getKey(), r)))
+                        .toList()
+        );
+        sorted_edges.sort((e1, e2) -> e2.reader.compareTo(e1.reader)); // reverse
+        List<BooleanFormula> enc = new ArrayList<>();
+
+        for (IDD_Edge edge : sorted_edges) {
+            // TODO: respect the overwrites
+            enc.add(bmgr.equivalence(context.dependency(edge.def.writer, edge.reader), bmgr.and(context.execution(edge.def.writer), context.controlFlow(edge.reader))));
+        }
         return bmgr.and(enc);
+    }
+
+    private void addDependencyEdge(RegisterDefinition start, RegReader end_border, HashSet<Event> visited_events, HashMap<RegisterDefinition, HashSet<RegReader>> edges_to_encode) {
+        // TODO: we need some kind of graph structure to be able to check for edges
+
+        // does this edge enable a simplification based on the existing edges from the current memory visible event that the recursive call chain was started from and the end reader of this call?
+        // that is only possible if there is no memory visible event on both paths and start and end are visible!
+        // if yes, merge the two paths
+        // if no, add the new edge if the new edge leads to a visible event
+
+        RegReader new_end_border = end_border;
+
+        if (isPossibleCunkBorder(start.writer)) {
+            // TODO: above
+
+            if (start.writer instanceof RegReader reader) {
+                new_end_border = reader;
+            }
+            visited_events.add(start.writer);
+        }
+
+        if (start.writer instanceof RegReader reader) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader); // TODO: in the end this code duplication could be removed
+            for (Register register : writers.getUsedRegisters()) {
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                for (RegWriter writer : reverse(reg.getMayWriters())) {
+                    RegisterDefinition def = new RegisterDefinition(writer, register);
+                    addDependencyEdge(def, new_end_border, visited_events, edges_to_encode);
+                }
+            }
+        }
+    }
+
+    private boolean isPossibleCunkBorder(Event event) {
+        return event.hasTag(Tag.MEMORY) && !event.hasTag(Tag.NO_CARRY_DEPS);
     }
 
     public BooleanFormula encodeFilter() {
