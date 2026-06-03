@@ -12,6 +12,7 @@ import com.dat3m.dartagnan.program.analysis.ReachingDefinitionsAnalysis;
 import com.dat3m.dartagnan.program.analysis.alias.AliasAnalysis;
 import com.dat3m.dartagnan.program.event.Event;
 import com.dat3m.dartagnan.program.event.RegReader;
+import com.dat3m.dartagnan.program.event.RegWriter;
 import com.dat3m.dartagnan.program.event.Tag;
 import com.dat3m.dartagnan.program.event.core.*;
 import com.dat3m.dartagnan.program.event.lang.svcomp.EndAtomic;
@@ -34,6 +35,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.sosy_lab.common.configuration.Configuration;
 import org.sosy_lab.common.configuration.InvalidConfigurationException;
+import org.sosy_lab.java_smt.api.BooleanFormula;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -59,6 +61,7 @@ public class NativeRelationAnalysis implements RelationAnalysis {
     protected final ReachingDefinitionsAnalysis definitions;
     protected final AliasAnalysis alias;
     protected final WmmAnalysis wmmAnalysis;
+    protected final DataDependencyCunkAnalysis chunkAnalysis;
     protected final Map<Relation, MutableKnowledge> knowledgeMap = new HashMap<>();
     protected final MutableEventGraph mutex = new MapEventGraph();
 
@@ -69,6 +72,7 @@ public class NativeRelationAnalysis implements RelationAnalysis {
         definitions = context.requires(ReachingDefinitionsAnalysis.class);
         alias = context.requires(AliasAnalysis.class);
         wmmAnalysis = context.requires(WmmAnalysis.class);
+        chunkAnalysis = context.requires(DataDependencyCunkAnalysis.class);
     }
 
     /**
@@ -593,8 +597,44 @@ public class NativeRelationAnalysis implements RelationAnalysis {
 
         @Override
         public MutableKnowledge visitInternalDataDependency(DirectDataDependency idd) {
-            // FIXME: Our "internal data dependency" relation is quite odd an contains all but address dependencies.
-            return computeInternalDependencies(EnumSet.of(DATA, CTRL, OTHER));
+            MutableKnowledge data_knowledge = computeDependencyChunkDependencies(); // DATA
+            MutableKnowledge ctrl_knowledge = computeInternalDependencies(EnumSet.of(CTRL, OTHER));
+
+            MutableEventGraph may = new MapEventGraph();
+            MutableEventGraph must = new MapEventGraph();
+
+            may.addAll(data_knowledge.getMaySet());
+            may.addAll(ctrl_knowledge.getMaySet());
+            must.addAll(data_knowledge.getMustSet());
+            must.addAll(ctrl_knowledge.getMustSet());
+
+            return new MutableKnowledge(may, must);
+        }
+
+        private MutableKnowledge computeDependencyChunkDependencies() {
+            MutableEventGraph may = new MapEventGraph();
+            MutableEventGraph must = new MapEventGraph();
+
+            for (var register_map_entry : chunkAnalysis.getReverseReaderEntries()) {
+                final var reader = register_map_entry.getKey();
+                final var register_map = register_map_entry.getValue();
+
+                for (var entry : register_map.sequencedEntrySet()) {
+                    // TODO: add writer -> reader edges to sets
+                    final var other_borders = entry.getValue();
+                    // TODO: how to detect may-only-writers? assign that during the traversal depending on the encounter of condjumps?
+                }
+            }
+
+            // We need to track ExecutionStatus events separately, because they induce data-dependencies
+            for (ExecutionStatus execStatus : program.getThreadEvents(ExecutionStatus.class)) { // TODO: would these need connections to the encoded edges as well?
+                if (execStatus.doesTrackDep()) {
+                    may.add(execStatus.getStatusEvent(), execStatus);
+                    must.add(execStatus.getStatusEvent(), execStatus);
+                }
+            }
+
+            return new MutableKnowledge(may, must);
         }
 
         @Override
@@ -962,17 +1002,6 @@ public class NativeRelationAnalysis implements RelationAnalysis {
                     }
                     for (Event regWriter : reachDef.getMustWriters()) {
                         must.add(regWriter, regReader);
-                    }
-                }
-            }
-
-            // We need to track ExecutionStatus events separately, because they induce data-dependencies
-            // without reading from a register.
-            if (usageTypes.contains(DATA)) {
-                for (ExecutionStatus execStatus : program.getThreadEvents(ExecutionStatus.class)) {
-                    if (execStatus.doesTrackDep()) {
-                        may.add(execStatus.getStatusEvent(), execStatus);
-                        must.add(execStatus.getStatusEvent(), execStatus);
                     }
                 }
             }
