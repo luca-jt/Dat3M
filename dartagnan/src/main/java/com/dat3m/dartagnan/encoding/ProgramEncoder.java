@@ -19,8 +19,7 @@ import com.dat3m.dartagnan.program.event.core.threading.*;
 import com.dat3m.dartagnan.program.memory.Memory;
 import com.dat3m.dartagnan.program.memory.MemoryObject;
 import com.dat3m.dartagnan.verification.Context;
-import com.dat3m.dartagnan.wmm.analysis.DataDependencyCunkAnalysis;
-import com.dat3m.dartagnan.wmm.utils.graph.mutable.MapEventGraph;
+import com.dat3m.dartagnan.wmm.analysis.DataDependencyChunkAnalysis;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
@@ -69,7 +68,7 @@ public class ProgramEncoder {
     private final BooleanFormulaManager bmgr;
     private final ExpressionEncoder exprEnc;
 
-    private final DataDependencyCunkAnalysis chunkAnalysis;
+    private final DataDependencyChunkAnalysis chunkAnalysis;
 
     private ProgramEncoder(EncodingContext c) {
         Preconditions.checkArgument(c.getTask().getProgram().isCompiled(), "The program must be compiled before encoding.");
@@ -79,7 +78,7 @@ public class ProgramEncoder {
         this.definitions = c.getAnalysisContext().requires(ReachingDefinitionsAnalysis.class);
         this.bmgr = context.getBooleanFormulaManager();
         this.exprEnc = context.getExpressionEncoder();
-        this.chunkAnalysis = c.getAnalysisContext().requires(DataDependencyCunkAnalysis.class);
+        this.chunkAnalysis = c.getAnalysisContext().requires(DataDependencyChunkAnalysis.class);
     }
 
     public static ProgramEncoder withContext(EncodingContext context) throws InvalidConfigurationException {

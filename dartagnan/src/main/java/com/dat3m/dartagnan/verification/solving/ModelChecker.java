@@ -1,7 +1,6 @@
 package com.dat3m.dartagnan.verification.solving;
 
 import com.dat3m.dartagnan.GlobalSettings;
-import com.dat3m.dartagnan.configuration.Method;
 import com.dat3m.dartagnan.configuration.Property;
 import com.dat3m.dartagnan.encoding.EncodingContext;
 import com.dat3m.dartagnan.encoding.IREvaluator;
@@ -17,13 +16,10 @@ import com.dat3m.dartagnan.program.event.Event;
 import com.dat3m.dartagnan.program.processing.ProcessingManager;
 import com.dat3m.dartagnan.smt.ProverWithTracker;
 import com.dat3m.dartagnan.utils.Result;
-import com.dat3m.dartagnan.utils.Utils;
 import com.dat3m.dartagnan.verification.Context;
 import com.dat3m.dartagnan.verification.VerificationTask;
-import com.dat3m.dartagnan.verification.model.ExecutionModelManager;
-import com.dat3m.dartagnan.verification.model.ExecutionModelNext;
 import com.dat3m.dartagnan.wmm.Wmm;
-import com.dat3m.dartagnan.wmm.analysis.DataDependencyCunkAnalysis;
+import com.dat3m.dartagnan.wmm.analysis.DataDependencyChunkAnalysis;
 import com.dat3m.dartagnan.wmm.analysis.RelationAnalysis;
 import com.dat3m.dartagnan.wmm.analysis.WmmAnalysis;
 import com.dat3m.dartagnan.wmm.processing.WmmProcessingManager;
@@ -37,10 +33,7 @@ import org.sosy_lab.java_smt.SolverContextFactory;
 import org.sosy_lab.java_smt.api.SolverContext;
 import org.sosy_lab.java_smt.api.SolverException;
 
-import java.util.concurrent.TimeUnit;
-
 import static com.dat3m.dartagnan.configuration.OptionNames.*;
-import static com.dat3m.dartagnan.configuration.Property.DATARACEFREEDOM;
 import static com.dat3m.dartagnan.smt.SMTHelper.createSolverContext;
 import static com.dat3m.dartagnan.utils.Result.*;
 
@@ -200,7 +193,7 @@ public abstract class ModelChecker implements AutoCloseable {
 
     public static void performStaticWmmAnalyses(VerificationTask task, Context analysisContext, Configuration config) throws InvalidConfigurationException {
         analysisContext.register(WmmAnalysis.class, WmmAnalysis.fromConfig(task.getMemoryModel(), task.getProgram().getArch(), config));
-        analysisContext.register(DataDependencyCunkAnalysis.class, new DataDependencyCunkAnalysis(task, analysisContext)); // @Note(luca): hacky insertion here
+        analysisContext.register(DataDependencyChunkAnalysis.class, new DataDependencyChunkAnalysis(task, analysisContext)); // @Note(luca): hacky insertion here
         analysisContext.register(RelationAnalysis.class, RelationAnalysis.fromConfig(task, analysisContext, config));
     }
 

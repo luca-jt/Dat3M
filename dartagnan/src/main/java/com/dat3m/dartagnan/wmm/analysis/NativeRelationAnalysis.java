@@ -12,7 +12,6 @@ import com.dat3m.dartagnan.program.analysis.ReachingDefinitionsAnalysis;
 import com.dat3m.dartagnan.program.analysis.alias.AliasAnalysis;
 import com.dat3m.dartagnan.program.event.Event;
 import com.dat3m.dartagnan.program.event.RegReader;
-import com.dat3m.dartagnan.program.event.RegWriter;
 import com.dat3m.dartagnan.program.event.Tag;
 import com.dat3m.dartagnan.program.event.core.*;
 import com.dat3m.dartagnan.program.event.lang.svcomp.EndAtomic;
@@ -35,7 +34,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.sosy_lab.common.configuration.Configuration;
 import org.sosy_lab.common.configuration.InvalidConfigurationException;
-import org.sosy_lab.java_smt.api.BooleanFormula;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -61,7 +59,7 @@ public class NativeRelationAnalysis implements RelationAnalysis {
     protected final ReachingDefinitionsAnalysis definitions;
     protected final AliasAnalysis alias;
     protected final WmmAnalysis wmmAnalysis;
-    protected final DataDependencyCunkAnalysis chunkAnalysis;
+    protected final DataDependencyChunkAnalysis chunkAnalysis;
     protected final Map<Relation, MutableKnowledge> knowledgeMap = new HashMap<>();
     protected final MutableEventGraph mutex = new MapEventGraph();
 
@@ -72,7 +70,7 @@ public class NativeRelationAnalysis implements RelationAnalysis {
         definitions = context.requires(ReachingDefinitionsAnalysis.class);
         alias = context.requires(AliasAnalysis.class);
         wmmAnalysis = context.requires(WmmAnalysis.class);
-        chunkAnalysis = context.requires(DataDependencyCunkAnalysis.class);
+        chunkAnalysis = context.requires(DataDependencyChunkAnalysis.class);
     }
 
     /**
@@ -623,11 +621,13 @@ public class NativeRelationAnalysis implements RelationAnalysis {
                     // TODO: add writer -> reader edges to sets
                     final var other_borders = entry.getValue();
                     // TODO: how to detect may-only-writers? assign that during the traversal depending on the encounter of condjumps?
+                    // during the traversal keep track of the must-ness of the branch. a single may-only link makes the whole branch may-only.
+                    // the border-border connections can be established more than once -> if a single path is must, the resulting simplified link is must
                 }
             }
 
             // We need to track ExecutionStatus events separately, because they induce data-dependencies
-            for (ExecutionStatus execStatus : program.getThreadEvents(ExecutionStatus.class)) { // TODO: would these need connections to the encoded edges as well?
+            for (ExecutionStatus execStatus : program.getThreadEvents(ExecutionStatus.class)) {
                 if (execStatus.doesTrackDep()) {
                     may.add(execStatus.getStatusEvent(), execStatus);
                     must.add(execStatus.getStatusEvent(), execStatus);

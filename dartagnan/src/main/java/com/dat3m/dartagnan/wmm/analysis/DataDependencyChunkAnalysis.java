@@ -8,6 +8,7 @@ import com.dat3m.dartagnan.program.event.RegReader;
 import com.dat3m.dartagnan.program.event.RegWriter;
 import com.dat3m.dartagnan.program.event.Tag;
 import com.dat3m.dartagnan.program.event.core.CondJump;
+import com.dat3m.dartagnan.program.event.core.ExecutionStatus;
 import com.dat3m.dartagnan.program.event.core.Local;
 import com.dat3m.dartagnan.verification.Context;
 import com.dat3m.dartagnan.verification.VerificationTask;
@@ -19,7 +20,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Lists.reverse;
 
 
-public class DataDependencyCunkAnalysis {
+public class DataDependencyChunkAnalysis {
     protected final VerificationTask task;
     protected final Context analysisContext;
     protected final ExecutionAnalysis exec;
@@ -29,7 +30,7 @@ public class DataDependencyCunkAnalysis {
     private final HashMap<RegReader, LinkedHashMap<Register, ArrayList<RegWriter>>> reverse_edge_map;
     private final HashMap<Event, Boolean> chunk_borders = new HashMap<>();
 
-    public DataDependencyCunkAnalysis(VerificationTask t, Context context) {
+    public DataDependencyChunkAnalysis(VerificationTask t, Context context) {
         task = checkNotNull(t);
         analysisContext = context;
         exec = context.requires(ExecutionAnalysis.class);
@@ -77,6 +78,7 @@ public class DataDependencyCunkAnalysis {
             if (e.hasTag(Tag.NO_CARRY_DEPS)) return false;
             if (e.hasTag(Tag.MEMORY)) return true;
             if (e instanceof CondJump) return true; // is not writing anyways, so these will only be sinks
+            if (e instanceof ExecutionStatus) return true; // For the edges to status events
             if (e instanceof Local local) {
                 final var result_reg = local.getResultRegister();
                 for (RegReader reader : e.getFunction().getEvents(RegReader.class).stream()
