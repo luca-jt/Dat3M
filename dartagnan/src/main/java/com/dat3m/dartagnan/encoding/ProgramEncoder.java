@@ -26,6 +26,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
+import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.sosy_lab.common.configuration.InvalidConfigurationException;
@@ -507,6 +508,11 @@ public class ProgramEncoder {
         return bmgr.and(enc);
     }
 
+    record RegisterReadSignature(
+            List<Pair<Integer, Boolean>> writer_ids_with_must_flag,
+            Register register
+    ) {}
+
     public BooleanFormula encodeDataFlow() {
         logger.info("Encoding data flow.");
 
@@ -516,45 +522,65 @@ public class ProgramEncoder {
         return bmgr.and(data_value_formula, dependency_formula);
     }
 
+    private BooleanFormula encodeWriterValueForReader(RegWriter writer, RegReader reader, Register register) {
+        // TODO: use the signatures
+        return exprEnc.assignEqualAt(register, reader, context.result(writer), writer);
+    }
+
     public BooleanFormula encodeDataValues() {
         logger.info("Encoding data values.");
 
         final ExpressionFactory exprs = ExpressionFactory.getInstance();
-
         List<BooleanFormula> enc = new ArrayList<>();
+        HashMap<RegisterReadSignature, BooleanFormula> reader_signature_formulas = new HashMap<>();
+
+        /*
+        - a 'block' of writers that contains may-writers ends with a must writer -> overwrites can be handled that way by just linearly iterating over them
+        - we can just iterate over the writers in reverse order and always turn them into a single big if-then-else?!
+        */
+
         for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
             for (Register register : writers.getUsedRegisters()) {
-                final List<BooleanFormula> overwrite = new ArrayList<>();
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
-                for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    final BooleanFormula equalValue = exprEnc.assignEqualAt(register, reader, context.result(writer), writer);
-                    if (reg.getMustWriters().contains(writer)) {
-                        if (exec.isImplied(reader, writer) && reader.cfImpliesExec()) {
-                            assert reg.getMayWriters().size() == 1;
-                            enc.add(equalValue);
-                        } else {
-                            enc.add(bmgr.implication(bmgr.and(context.execution(writer), context.controlFlow(reader)), equalValue));
-                        }
-                    } else {
-                        enc.add(bmgr.implication(bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))), equalValue));
-                    }
-                    overwrite.add(context.execution(writer));
-                }
+                final var may_writers = reg.getMayWriters();
+                final var must_writers = reg.getMustWriters();
 
-                if (initializeRegisters && !reg.mustBeInitialized()) {
-                    final Expression zero = exprs.makeGeneralZero(register.getType());
-                    overwrite.add(bmgr.not(context.controlFlow(reader)));
-                    overwrite.add(exprEnc.assignEqualAt(register, reader, zero, reader));
-                    enc.add(bmgr.or(overwrite));
-                }
+                final RegisterReadSignature signature = new RegisterReadSignature(
+                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
+                        register
+                );
+
+                final var reader_variable = reader_signature_formulas.computeIfAbsent(signature, sig -> {
+                    final var phi_var = bmgr.makeVariable("phi_" + reader_signature_formulas.size());
+                    final var last_writer_in_reverse_order = may_writers.getFirst(); // we put the existing formula in the else block, so no reverse order iteration
+
+                    BooleanFormula ite = encodeWriterValueForReader(last_writer_in_reverse_order, reader, register);
+                    if (initializeRegisters && !reg.mustBeInitialized()) {
+                        final Expression zero = exprs.makeGeneralZero(register.getType());
+                        ite = bmgr.ifThenElse(context.execution(last_writer_in_reverse_order), ite, exprEnc.assignEqualAt(register, reader, zero, reader));
+                    }
+
+                    for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
+                        final BooleanFormula case_encoding = encodeWriterValueForReader(writer, reader, register);
+                        ite = bmgr.ifThenElse(context.execution(writer), case_encoding, ite);
+                    }
+
+                    enc.add(bmgr.equivalence(phi_var, ite));
+
+                    return phi_var;
+                });
+
+                enc.add(bmgr.implication(context.controlFlow(reader), reader_variable));
             }
         }
+
         return bmgr.and(enc);
     }
 
     public BooleanFormula encodeDataDependencies() {
         logger.info("Encoding data dependencies.");
+
         HashSet<Event> visited_events = new HashSet<>();
 
         for (RegReader possible_sink : reverse(context.getTask().getProgram().getThreadEvents(RegReader.class))) {
@@ -590,7 +616,7 @@ public class ProgramEncoder {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
 
             final var writers_from_map = reverse_map.get(reader);
-            if (writers_from_map == null) continue; // TODO: exclude cases where this is important in another way?
+            if (writers_from_map == null) continue;
 
             LinkedHashMap<Register, LinkedHashSet<RegWriter>> used_registers = new LinkedHashMap<>();
             final var other_borders = writers_from_map.stream().sorted(Comparator.reverseOrder()).toList(); // reverse program order
@@ -626,15 +652,7 @@ public class ProgramEncoder {
         RegReader new_end_border = end_border;
 
         if (isPossibleCunkBorder(start)) {
-            ArrayList<Event> existing_path = new ArrayList<>();
-            final var path_found = transitiveEdgeWithoutVisibleEventExistsBetween(existing_path, start, end_border);
-            if (existing_path.size() > 2) {
-                assert path_found;
-                for (List<Event> edge : slidingWindow(existing_path, 2).toList()) {
-                    final var removed = edges_to_encode.remove(edge.get(1), edge.get(0)); // returned list is in reverse order
-                    assert removed;
-                }
-            }
+            final var path_found = edges_to_encode.contains(start, end_border);
             if (!path_found) {
                 edges_to_encode.add(start, end_border);
             }
@@ -656,31 +674,23 @@ public class ProgramEncoder {
         }
     }
 
-    private boolean transitiveEdgeWithoutVisibleEventExistsBetween(ArrayList<Event> transitive, Event from, Event to) {
-        if (from.equals(to)) {
-            transitive.add(to);
-            return true;
-        }
-        for (Event child : edges_to_encode.getRange(from)) {
-            if (isPossibleCunkBorder(child) && !child.equals(to)) {
-                return false;
-            }
-            final var edge_found = transitiveEdgeWithoutVisibleEventExistsBetween(transitive, child, to);
-            if (edge_found) {
-                transitive.add(from);
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static <T> Stream<List<T>> slidingWindow(List<T> list, int size) {
         if (size > list.size()) return Stream.empty();
         return IntStream.range(0, list.size()-size+1).mapToObj(start -> list.subList(start, start+size));
     }
 
     private boolean isPossibleCunkBorder(Event event) {
-        return event.hasTag(Tag.MEMORY) && !event.hasTag(Tag.NO_CARRY_DEPS);
+        if (event.hasTag(Tag.NO_CARRY_DEPS)) return false;
+        if (event.hasTag(Tag.MEMORY)) return true;
+        if (event instanceof CondJump) return true; // is not writing anyways, so these will only be sinks
+        if (event instanceof Local local) {
+            final var result_reg = local.getResultRegister();
+            for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class).stream().filter(this::isPossibleCunkBorder).toList()) { // TODO: speed (loop necessary, cache results for isPossibleCunkBorder?
+                final var fitting_read = reader.getRegisterReads().stream().filter(read -> read.register() == result_reg && read.usageType() == Register.UsageType.ADDR).findAny();
+                if (fitting_read.isPresent()) return true;
+            }
+        }
+        return false;
     }
 
     public BooleanFormula encodeFilter() {
