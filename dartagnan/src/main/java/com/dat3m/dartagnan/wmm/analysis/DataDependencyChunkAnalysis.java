@@ -8,12 +8,14 @@ import com.dat3m.dartagnan.program.event.RegReader;
 import com.dat3m.dartagnan.program.event.RegWriter;
 import com.dat3m.dartagnan.program.event.Tag;
 import com.dat3m.dartagnan.program.event.core.CondJump;
+import com.dat3m.dartagnan.program.event.core.ExecutionStatus;
 import com.dat3m.dartagnan.program.event.core.Local;
 import com.dat3m.dartagnan.verification.Context;
 import com.dat3m.dartagnan.verification.VerificationTask;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
+import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Lists.reverse;
@@ -28,6 +30,7 @@ public class DataDependencyChunkAnalysis {
     private final HashMap<Pair<RegWriter, RegReader>, Boolean> edges_to_encode; // booleans store must-ness
     private final HashMap<RegReader, HashMap<Register, ArrayList<Pair<RegWriter, Boolean>>>> reverse_edge_map;
     private final HashMap<Event, Boolean> chunk_borders;
+    private final HashSet<Event> status_events;
 
     public DataDependencyChunkAnalysis(VerificationTask t, Context context) {
         task = checkNotNull(t);
@@ -38,9 +41,15 @@ public class DataDependencyChunkAnalysis {
         edges_to_encode = new HashMap<>();
         reverse_edge_map = new HashMap<>();
         chunk_borders = new HashMap<>();
-    }
+        status_events = new HashSet<>();
 
-    public void run() { // TODO: where to insert? interface?
+
+        for (ExecutionStatus execStatus : task.getProgram().getThreadEvents(ExecutionStatus.class)) {
+            if (execStatus.doesTrackDep()) {
+                status_events.add(execStatus.getStatusEvent());
+            }
+        }
+
         HashSet<Event> visited_events = new HashSet<>();
 
         for (RegReader possible_sink : reverse(task.getProgram().getThreadEvents(RegReader.class))) {
@@ -77,27 +86,35 @@ public class DataDependencyChunkAnalysis {
     }
 
     private boolean isPossibleCunkBorder(Event event) {
-        return chunk_borders.computeIfAbsent(event, e -> {
-            if (e.hasTag(Tag.NO_CARRY_DEPS)) return false;
-            if (e.hasTag(Tag.MEMORY)) return true;
-            if (e instanceof CondJump) return true; // is not writing anyways, so these will only be sinks
-            //if (e instanceof ExecutionStatus) return true; // For the edges to status events
-            if (e instanceof Local local) {
-                final var result_reg = local.getResultRegister();
-                for (RegReader reader : e.getFunction().getEvents(RegReader.class).stream()
-                        .filter(r -> r.getLocalId() > local.getLocalId())
-                        .filter(this::isPossibleCunkBorder)
-                        .toList()
-                ) {
-                    final var fitting_read = reader.getRegisterReads().stream()
-                            .filter(read -> read.register() == result_reg && read.usageType() == Register.UsageType.ADDR)
-                            .findAny();
+        final var is_chunk_border_value = chunk_borders.get(event);
+        if (is_chunk_border_value == null) {
+            final Supplier<Boolean> value_computation = () -> {
+                if (event.hasTag(Tag.NO_CARRY_DEPS)) return false;
+                if (event.hasTag(Tag.MEMORY)) return true;
+                if (event instanceof CondJump) return true; // is not writing anyways, so these will only be sinks
+                if (status_events.contains(event)) return true; // For the edges to status events
+                if (event instanceof Local local) {
+                    final var result_reg = local.getResultRegister();
+                    for (RegReader reader : event.getFunction().getEvents(RegReader.class).stream()
+                            .filter(r -> r.getLocalId() > local.getLocalId())
+                            .filter(this::isPossibleCunkBorder)
+                            .toList()
+                    ) {
+                        final var fitting_read = reader.getRegisterReads().stream()
+                                .filter(read -> read.register() == result_reg && read.usageType() == Register.UsageType.ADDR)
+                                .findAny();
 
-                    if (fitting_read.isPresent()) return true;
+                        if (fitting_read.isPresent()) return true;
+                    }
                 }
-            }
-            return false;
-        });
+                return false;
+            };
+            final var value = value_computation.get();
+            chunk_borders.put(event, value);
+            return value;
+        } else {
+            return is_chunk_border_value;
+        }
     }
 
     public Set<Map.Entry<RegReader, HashMap<Register, ArrayList<Pair<RegWriter, Boolean>>>>> getReverseReaderEntries() {

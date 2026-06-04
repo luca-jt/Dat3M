@@ -592,6 +592,11 @@ public class NativeRelationAnalysis implements RelationAnalysis {
         public MutableKnowledge visitAddressDependency(DirectAddressDependency addrDep) {
             return computeInternalDependencies(EnumSet.of(ADDR));
         }
+/*
+        @Override
+        public MutableKnowledge visitInternalDataDependency(DirectDataDependency idd) {
+            return computeInternalDependencies(EnumSet.of(CTRL, DATA, OTHER));
+        }*/
 
         @Override
         public MutableKnowledge visitInternalDataDependency(DirectDataDependency idd) {

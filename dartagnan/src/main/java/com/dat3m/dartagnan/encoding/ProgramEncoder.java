@@ -522,7 +522,7 @@ public class ProgramEncoder {
 
         final ExpressionFactory exprs = ExpressionFactory.getInstance();
         List<BooleanFormula> enc = new ArrayList<>();
-        HashMap<RegisterReadSignature, BooleanFormula> reader_signature_formulas = new HashMap<>();
+        HashMap<RegisterReadSignature, Expression> reader_signature_formulas = new HashMap<>();
 
         for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
@@ -537,27 +537,26 @@ public class ProgramEncoder {
                 );
 
                 final var reader_variable = reader_signature_formulas.computeIfAbsent(signature, sig -> {
-                    final var phi_var = bmgr.makeVariable("phi_" + reader_signature_formulas.size());
+                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
                     final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
-                    final var reader_encoding = exprEnc.encodeAt(register, reader);
 
-                    BooleanFormula ite = exprEnc.assignEqual(reader_encoding, exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order));
+                    Expression ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
                     if (initializeRegisters && !reg.mustBeInitialized()) {
                         final Expression zero = exprs.makeGeneralZero(register.getType());
-                        ite = bmgr.ifThenElse(context.execution(last_writer_in_reverse_order), ite, exprEnc.assignEqualAt(register, reader, zero, reader));
+                        ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, zero);
                     }
 
                     for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
-                        final BooleanFormula case_encoding = exprEnc.assignEqual(reader_encoding, exprEnc.encodeAt(context.result(writer), writer));
-                        ite = bmgr.ifThenElse(context.execution(writer), case_encoding, ite);
+                        final Expression case_encoding = exprEnc.encodeAt(context.result(writer), writer);
+                        ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
                     }
 
-                    enc.add(bmgr.equivalence(phi_var, ite));
+                    enc.add(exprEnc.assignEqual(phi_var, ite));
 
                     return phi_var;
                 });
 
-                enc.add(bmgr.implication(context.controlFlow(reader), reader_variable));
+                enc.add(bmgr.implication(context.controlFlow(reader), exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_variable)));
             }
         }
 
@@ -582,7 +581,7 @@ public class ProgramEncoder {
                 for (var writer_entry : entry.getValue()) {
                     final var writer = writer_entry.getLeft();
                     if (!writer_entry.getRight()) {
-                        enc.add(bmgr.equivalence(context.dependency(writer, reader), bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))))); // TODO: if the EncodingContext.edge calls execution(), the second event requires execution, not only control flow...
+                        enc.add(bmgr.equivalence(context.dependency(writer, reader), bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)))));
                     }
                     overwrite.add(context.execution(writer));
                 }
