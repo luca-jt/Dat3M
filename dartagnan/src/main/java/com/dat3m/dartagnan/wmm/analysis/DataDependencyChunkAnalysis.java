@@ -8,11 +8,10 @@ import com.dat3m.dartagnan.program.event.RegReader;
 import com.dat3m.dartagnan.program.event.RegWriter;
 import com.dat3m.dartagnan.program.event.Tag;
 import com.dat3m.dartagnan.program.event.core.CondJump;
-import com.dat3m.dartagnan.program.event.core.ExecutionStatus;
 import com.dat3m.dartagnan.program.event.core.Local;
 import com.dat3m.dartagnan.verification.Context;
 import com.dat3m.dartagnan.verification.VerificationTask;
-import com.dat3m.dartagnan.wmm.utils.graph.mutable.MapEventGraph;
+import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
 
@@ -26,17 +25,22 @@ public class DataDependencyChunkAnalysis {
     protected final ExecutionAnalysis exec;
     protected final ReachingDefinitionsAnalysis definitions;
 
-    private final MapEventGraph edges_to_encode = new MapEventGraph();
-    private final HashMap<RegReader, LinkedHashMap<Register, ArrayList<RegWriter>>> reverse_edge_map;
-    private final HashMap<Event, Boolean> chunk_borders = new HashMap<>();
+    private final HashMap<Pair<RegWriter, RegReader>, Boolean> edges_to_encode; // booleans store must-ness
+    private final HashMap<RegReader, HashMap<Register, ArrayList<Pair<RegWriter, Boolean>>>> reverse_edge_map;
+    private final HashMap<Event, Boolean> chunk_borders;
 
     public DataDependencyChunkAnalysis(VerificationTask t, Context context) {
         task = checkNotNull(t);
         analysisContext = context;
         exec = context.requires(ExecutionAnalysis.class);
         definitions = context.requires(ReachingDefinitionsAnalysis.class);
-        reverse_edge_map = new HashMap<>();
 
+        edges_to_encode = new HashMap<>();
+        reverse_edge_map = new HashMap<>();
+        chunk_borders = new HashMap<>();
+    }
+
+    public void run() { // TODO: where to insert? interface?
         HashSet<Event> visited_events = new HashSet<>();
 
         for (RegReader possible_sink : reverse(task.getProgram().getThreadEvents(RegReader.class))) {
@@ -51,34 +55,33 @@ public class DataDependencyChunkAnalysis {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(possible_sink);
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                final var must_writers = reg.getMustWriters();
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    addDependencyEdge(writer, possible_sink, visited_events);
+                    addDependencyEdge(writer, possible_sink, visited_events, must_writers.contains(writer));
                 }
             }
         }
 
-        final var reverse_edges = edges_to_encode.getInMap();
+        for (var entry : edges_to_encode.entrySet()) {
+            final RegReader reader = entry.getKey().getRight();
+            final RegWriter border = entry.getKey().getLeft();
+            final var is_must = entry.getValue();
+            final var writer_map = reverse_edge_map.computeIfAbsent(reader, r -> new HashMap<>());
+            final var writer_list = writer_map.computeIfAbsent(border.getResultRegister(), r -> new ArrayList<>());
+            writer_list.add(Pair.of(border, is_must));
+        }
 
-        for (var entry : reverse_edges.entrySet()) {
-            final RegReader reader = (RegReader) entry.getKey();
-            final var writers = entry.getValue();
-            var writer_map = reverse_edge_map.computeIfAbsent(reader, r -> new LinkedHashMap<>());
-
-            final var other_borders = writers.stream().sorted(Comparator.reverseOrder()).toList(); // reverse program order
-            for (Event border : other_borders) {
-                final RegWriter casted = (RegWriter) border; // cast is fine here
-                var writer_set = writer_map.computeIfAbsent(casted.getResultRegister(), r -> new ArrayList<>());
-                writer_set.add(casted);
-            }
+        for (var to_list : reverse_edge_map.values().stream().flatMap(map -> map.values().stream()).toList()) {
+            to_list.sort((c1, c2) -> c2.getLeft().compareTo(c1.getLeft())); // reverse program order
         }
     }
 
-    public boolean isPossibleCunkBorder(Event event) {
+    private boolean isPossibleCunkBorder(Event event) {
         return chunk_borders.computeIfAbsent(event, e -> {
             if (e.hasTag(Tag.NO_CARRY_DEPS)) return false;
             if (e.hasTag(Tag.MEMORY)) return true;
             if (e instanceof CondJump) return true; // is not writing anyways, so these will only be sinks
-            if (e instanceof ExecutionStatus) return true; // For the edges to status events
+            //if (e instanceof ExecutionStatus) return true; // For the edges to status events
             if (e instanceof Local local) {
                 final var result_reg = local.getResultRegister();
                 for (RegReader reader : e.getFunction().getEvents(RegReader.class).stream()
@@ -97,7 +100,7 @@ public class DataDependencyChunkAnalysis {
         });
     }
 
-    public Set<Map.Entry<RegReader, LinkedHashMap<Register, ArrayList<RegWriter>>>> getReverseReaderEntries() {
+    public Set<Map.Entry<RegReader, HashMap<Register, ArrayList<Pair<RegWriter, Boolean>>>>> getReverseReaderEntries() {
         return reverse_edge_map.entrySet();
     }
 
@@ -105,14 +108,13 @@ public class DataDependencyChunkAnalysis {
         return edges_to_encode.isEmpty();
     }
 
-    private void addDependencyEdge(RegWriter start, RegReader end_border, HashSet<Event> visited_events) {
+    private void addDependencyEdge(RegWriter start, RegReader end_border, HashSet<Event> visited_events, boolean is_must_path) {
         RegReader new_end_border = end_border;
+        final var start_is_chunk_border = isPossibleCunkBorder(start);
 
-        if (isPossibleCunkBorder(start)) {
-            final var path_found = edges_to_encode.contains(start, end_border);
-            if (!path_found) {
-                edges_to_encode.add(start, end_border);
-            }
+        if (start_is_chunk_border) {
+            final var edge_key = Pair.of(start, end_border);
+            edges_to_encode.merge(edge_key, is_must_path, (a, b) -> b || a);
 
             if (start instanceof RegReader reader) {
                 new_end_border = reader;
@@ -124,8 +126,10 @@ public class DataDependencyChunkAnalysis {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                final var must_writers = reg.getMustWriters();
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    addDependencyEdge(writer, new_end_border, visited_events);
+                    final var path_is_still_must = (is_must_path || start_is_chunk_border) && must_writers.contains(writer);
+                    addDependencyEdge(writer, new_end_border, visited_events, path_is_still_must);
                 }
             }
         }

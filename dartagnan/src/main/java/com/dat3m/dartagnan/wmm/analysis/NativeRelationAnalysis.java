@@ -617,19 +617,21 @@ public class NativeRelationAnalysis implements RelationAnalysis {
                 final var reader = register_map_entry.getKey();
                 final var register_map = register_map_entry.getValue();
 
-                for (var entry : register_map.sequencedEntrySet()) {
-                    // TODO: add writer -> reader edges to sets
+                for (var entry : register_map.entrySet()) {
                     final var other_borders = entry.getValue();
-                    // TODO: how to detect may-only-writers? assign that during the traversal depending on the encounter of condjumps?
-                    // during the traversal keep track of the must-ness of the branch. a single may-only link makes the whole branch may-only.
-                    // the border-border connections can be established more than once -> if a single path is must, the resulting simplified link is must
+                    for (var border : other_borders) {
+                        may.add(border.getLeft(), reader);
+                        if (border.getRight()) {
+                            must.add(border.getLeft(), reader);
+                        }
+                    }
                 }
             }
 
             // We need to track ExecutionStatus events separately, because they induce data-dependencies
             for (ExecutionStatus execStatus : program.getThreadEvents(ExecutionStatus.class)) {
                 if (execStatus.doesTrackDep()) {
-                    may.add(execStatus.getStatusEvent(), execStatus);
+                    may.add(execStatus.getStatusEvent(), execStatus); // TODO: these edges have to be connected to the reduced graph, status event has to be sink?
                     must.add(execStatus.getStatusEvent(), execStatus);
                 }
             }

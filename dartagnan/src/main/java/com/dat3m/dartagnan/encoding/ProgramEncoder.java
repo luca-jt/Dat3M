@@ -538,7 +538,7 @@ public class ProgramEncoder {
 
                 final var reader_variable = reader_signature_formulas.computeIfAbsent(signature, sig -> {
                     final var phi_var = bmgr.makeVariable("phi_" + reader_signature_formulas.size());
-                    final var last_writer_in_reverse_order = may_writers.getFirst(); // we put the existing formula in the else block, so no reverse order iteration
+                    final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
                     final var reader_encoding = exprEnc.encodeAt(register, reader);
 
                     BooleanFormula ite = exprEnc.assignEqual(reader_encoding, exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order));
@@ -577,10 +577,13 @@ public class ProgramEncoder {
             final var reader = register_map_entry.getKey();
             final var register_map = register_map_entry.getValue();
 
-            for (var entry : register_map.sequencedEntrySet()) {
+            for (var entry : register_map.entrySet()) {
                 final List<BooleanFormula> overwrite = new ArrayList<>();
-                for (RegWriter writer : entry.getValue()) {
-                    enc.add(bmgr.equivalence(context.dependency(writer, reader), bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)))));
+                for (var writer_entry : entry.getValue()) {
+                    final var writer = writer_entry.getLeft();
+                    if (!writer_entry.getRight()) {
+                        enc.add(bmgr.equivalence(context.dependency(writer, reader), bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))))); // TODO: if the EncodingContext.edge calls execution(), the second event requires execution, not only control flow...
+                    }
                     overwrite.add(context.execution(writer));
                 }
             }
