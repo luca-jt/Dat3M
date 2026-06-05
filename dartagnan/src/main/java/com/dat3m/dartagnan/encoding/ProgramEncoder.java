@@ -511,13 +511,16 @@ public class ProgramEncoder {
     public BooleanFormula encodeDataFlow() {
         logger.info("Encoding data flow.");
 
-        final BooleanFormula data_value_formula = encodeDataValues();
+        //final BooleanFormula data_value_formula = encodeDataValuesAssignDuplicate();
+        //final BooleanFormula data_value_formula = encodeDataValuesAssign();
+        final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
+        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionNoPhi();
         final BooleanFormula dependency_formula = encodeDataDependencies();
 
         return bmgr.and(data_value_formula, dependency_formula);
     }
 
-    public BooleanFormula encodeDataValues() {
+    public BooleanFormula encodeDataValuesAssignDuplicate() {
         logger.info("Encoding data values.");
 
         final ExpressionFactory exprs = ExpressionFactory.getInstance();
@@ -567,6 +570,175 @@ public class ProgramEncoder {
                 if (ite_and_reader_var != null) {
                     enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), ite_and_reader_var.getRight()));
                     enc.add(ite_and_reader_var.getLeft());
+                }
+            }
+        }
+
+        return bmgr.and(enc);
+    }
+
+    public BooleanFormula encodeDataValuesAssign() {
+        logger.info("Encoding data values.");
+
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
+        List<BooleanFormula> enc = new ArrayList<>();
+        HashMap<RegisterReadSignature, TypedFormula<?, ?>> reader_signature_formulas = new HashMap<>();
+
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                final var may_writers = reg.getMayWriters();
+                final var must_writers = reg.getMustWriters();
+
+                final RegisterReadSignature signature = new RegisterReadSignature(
+                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
+                        register
+                );
+
+                final var reader_var = reader_signature_formulas.computeIfAbsent(signature, sig -> {
+                    final var reader_merge = exprEnc.makeVariable("reader_merge_" + reader_signature_formulas.size(), register.getType());
+                    BooleanFormula ite;
+
+                    if (may_writers.isEmpty()) {
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprEnc.assignEqual(reader_merge, exprs.makeGeneralZero(register.getType()));
+                        } else {
+                            return null;
+                        }
+                    } else {
+                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
+
+                        ite = exprEnc.assignEqual(reader_merge, exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order));
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            final var zero_case = exprEnc.assignEqual(reader_merge, exprs.makeGeneralZero(register.getType()));
+                            ite = bmgr.ifThenElse(context.execution(last_writer_in_reverse_order), ite, zero_case);
+                        }
+
+                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
+                            final var case_encoding = exprEnc.assignEqual(reader_merge, exprEnc.encodeAt(context.result(writer), writer));
+                            ite = bmgr.ifThenElse(context.execution(writer), case_encoding, ite);
+                        }
+                    }
+
+                    enc.add(ite);
+
+                    return reader_merge;
+                });
+
+                if (reader_var != null) {
+                    enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_var));
+                }
+            }
+        }
+
+        return bmgr.and(enc);
+    }
+
+    public BooleanFormula encodeDataValuesOnlyRightExpressionWithPhi() {
+        logger.info("Encoding data values.");
+
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
+        List<BooleanFormula> enc = new ArrayList<>();
+        HashMap<RegisterReadSignature, TypedFormula<?, ?>> reader_signature_formulas = new HashMap<>();
+
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                final var may_writers = reg.getMayWriters();
+                final var must_writers = reg.getMustWriters();
+
+                final RegisterReadSignature signature = new RegisterReadSignature(
+                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
+                        register
+                );
+
+                final var reader_phi = reader_signature_formulas.computeIfAbsent(signature, sig -> {
+                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
+                    Expression ite;
+
+                    if (may_writers.isEmpty()) {
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprs.makeGeneralZero(register.getType());
+                        } else {
+                            return null;
+                        }
+                    } else {
+                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
+
+                        ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, exprs.makeGeneralZero(register.getType()));
+                        }
+
+                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
+                            final var case_encoding = exprEnc.encodeAt(context.result(writer), writer);
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
+                        }
+                    }
+
+                    enc.add(exprEnc.assignEqual(phi_var, ite));
+
+                    return phi_var;
+                });
+
+                if (reader_phi != null) {
+                    enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_phi));
+                }
+            }
+        }
+
+        return bmgr.and(enc);
+    }
+
+    public BooleanFormula encodeDataValuesOnlyRightExpressionNoPhi() {
+        logger.info("Encoding data values.");
+
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
+        List<BooleanFormula> enc = new ArrayList<>();
+        HashMap<RegisterReadSignature, Expression> reader_signature_formulas = new HashMap<>();
+
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                final var may_writers = reg.getMayWriters();
+                final var must_writers = reg.getMustWriters();
+
+                final RegisterReadSignature signature = new RegisterReadSignature(
+                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
+                        register
+                );
+
+                final var reader_ite = reader_signature_formulas.computeIfAbsent(signature, sig -> {
+                    Expression ite;
+
+                    if (may_writers.isEmpty()) {
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprs.makeGeneralZero(register.getType());
+                        } else {
+                            return null;
+                        }
+                    } else {
+                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
+
+                        ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, exprs.makeGeneralZero(register.getType()));
+                        }
+
+                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
+                            final var case_encoding = exprEnc.encodeAt(context.result(writer), writer);
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
+                        }
+                    }
+
+                    return ite;
+                });
+
+                if (reader_ite != null) {
+                    enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_ite));
                 }
             }
         }
