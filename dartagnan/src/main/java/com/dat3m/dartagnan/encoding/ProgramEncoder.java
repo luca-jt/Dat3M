@@ -522,7 +522,7 @@ public class ProgramEncoder {
 
         final ExpressionFactory exprs = ExpressionFactory.getInstance();
         List<BooleanFormula> enc = new ArrayList<>();
-        HashMap<RegisterReadSignature, Expression> reader_signature_formulas = new HashMap<>();
+        HashMap<RegisterReadSignature, Pair<BooleanFormula, TypedFormula<?, ?>>> reader_signature_formulas = new HashMap<>();
 
         for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
@@ -536,27 +536,38 @@ public class ProgramEncoder {
                         register
                 );
 
-                final var reader_variable = reader_signature_formulas.computeIfAbsent(signature, sig -> {
-                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
-                    final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
+                final var ite_and_reader_var = reader_signature_formulas.computeIfAbsent(signature, sig -> {
+                    final var reader_var = exprEnc.makeVariable("reader_merge_" + reader_signature_formulas.size(), register.getType());
+                    BooleanFormula ite;
 
-                    Expression ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
-                    if (initializeRegisters && !reg.mustBeInitialized()) {
-                        final Expression zero = exprs.makeGeneralZero(register.getType());
-                        ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, zero);
+                    if (may_writers.isEmpty()) {
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprEnc.assignEqual(reader_var, exprs.makeGeneralZero(register.getType()));
+                        } else {
+                            return null;
+                        }
+                    } else {
+                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
+
+                        ite = exprEnc.assignEqual(reader_var, exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order));
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            final var zero_case = exprEnc.assignEqual(reader_var, exprs.makeGeneralZero(register.getType()));
+                            ite = bmgr.ifThenElse(context.execution(last_writer_in_reverse_order), ite, zero_case);
+                        }
+
+                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
+                            final var case_encoding = exprEnc.assignEqual(reader_var, exprEnc.encodeAt(context.result(writer), writer));
+                            ite = bmgr.ifThenElse(context.execution(writer), case_encoding, ite);
+                        }
                     }
 
-                    for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
-                        final Expression case_encoding = exprEnc.encodeAt(context.result(writer), writer);
-                        ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
-                    }
-
-                    enc.add(exprEnc.assignEqual(phi_var, ite));
-
-                    return phi_var;
+                    return Pair.of(ite, reader_var);
                 });
 
-                enc.add(bmgr.implication(context.controlFlow(reader), exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_variable)));
+                if (ite_and_reader_var != null) {
+                    enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), ite_and_reader_var.getRight()));
+                    enc.add(ite_and_reader_var.getLeft());
+                }
             }
         }
 
