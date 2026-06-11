@@ -513,9 +513,11 @@ public class ProgramEncoder {
 
         //final BooleanFormula data_value_formula = encodeDataValuesAssignDuplicate();
         //final BooleanFormula data_value_formula = encodeDataValuesAssign();
-        final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
+        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
+        final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiDuplicates();
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionNoPhi();
         final BooleanFormula dependency_formula = encodeDataDependencies();
+        //final BooleanFormula dependency_formula = encodeDataDependenciesOld();
 
         return bmgr.and(data_value_formula, dependency_formula);
     }
@@ -692,6 +694,62 @@ public class ProgramEncoder {
         return bmgr.and(enc);
     }
 
+    public BooleanFormula encodeDataValuesOnlyRightExpressionWithPhiDuplicates() {
+        logger.info("Encoding data values.");
+
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
+        List<BooleanFormula> enc = new ArrayList<>();
+        HashMap<RegisterReadSignature, Pair<TypedFormula<?, ?>, Expression>> reader_signature_formulas = new HashMap<>();
+
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                final var may_writers = reg.getMayWriters();
+                final var must_writers = reg.getMustWriters();
+
+                final RegisterReadSignature signature = new RegisterReadSignature(
+                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
+                        register
+                );
+
+                final var reader_phi_and_ite = reader_signature_formulas.computeIfAbsent(signature, sig -> {
+                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
+                    Expression ite;
+
+                    if (may_writers.isEmpty()) {
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprs.makeGeneralZero(register.getType());
+                        } else {
+                            return null;
+                        }
+                    } else {
+                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
+
+                        ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, exprs.makeGeneralZero(register.getType()));
+                        }
+
+                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
+                            final var case_encoding = exprEnc.encodeAt(context.result(writer), writer);
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
+                        }
+                    }
+
+                    return Pair.of(phi_var, ite);
+                });
+
+                if (reader_phi_and_ite != null) {
+                    enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_phi_and_ite.getLeft()));
+                    enc.add(exprEnc.assignEqual(reader_phi_and_ite.getLeft(), reader_phi_and_ite.getRight()));
+                }
+            }
+        }
+
+        return bmgr.and(enc);
+    }
+
     public BooleanFormula encodeDataValuesOnlyRightExpressionNoPhi() {
         logger.info("Encoding data values.");
 
@@ -771,6 +829,27 @@ public class ProgramEncoder {
             }
         }
 
+        return bmgr.and(enc);
+    }
+
+    public BooleanFormula encodeDataDependenciesOld() {
+        logger.info("Encoding dependencies");
+        List<BooleanFormula> enc = new ArrayList<>();
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                final List<BooleanFormula> overwrite = new ArrayList<>();
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                for (RegWriter writer : reverse(reg.getMayWriters())) {
+                    BooleanFormula edge;
+                    if (!reg.getMustWriters().contains(writer)) {
+                        edge = context.dependency(writer, reader);
+                        enc.add(bmgr.equivalence(edge, bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)))));
+                    }
+                    overwrite.add(context.execution(writer));
+                }
+            }
+        }
         return bmgr.and(enc);
     }
 

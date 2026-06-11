@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <dat3m.h>
 
-#define N 80
+#define N 100
 
 static int global = 0;
 
