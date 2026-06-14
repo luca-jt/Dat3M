@@ -55,7 +55,7 @@ public abstract class ModelChecker implements AutoCloseable {
         @Option(
                 name = SMTLIB2,
                 description = "Dump encoding to an SMTLIB2 file.")
-        private boolean smtlib = false;
+        private boolean smtlib = true;
 
         public boolean getDumpSmtLib() {
             return smtlib;

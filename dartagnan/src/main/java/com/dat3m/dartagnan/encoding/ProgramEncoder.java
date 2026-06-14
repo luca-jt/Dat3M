@@ -511,11 +511,12 @@ public class ProgramEncoder {
     public BooleanFormula encodeDataFlow() {
         logger.info("Encoding data flow.");
 
-        //final BooleanFormula data_value_formula = encodeDataValuesAssignDuplicate();
         //final BooleanFormula data_value_formula = encodeDataValuesAssign();
+        //final BooleanFormula data_value_formula = encodeDataValuesAssignDuplicate();
+        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpression();
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
         final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiDuplicates();
-        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionNoPhi();
+
         final BooleanFormula dependency_formula = encodeDataDependencies();
         //final BooleanFormula dependency_formula = encodeDataDependenciesOld();
 
@@ -750,7 +751,7 @@ public class ProgramEncoder {
         return bmgr.and(enc);
     }
 
-    public BooleanFormula encodeDataValuesOnlyRightExpressionNoPhi() {
+    public BooleanFormula encodeDataValuesOnlyRightExpression() {
         logger.info("Encoding data values.");
 
         final ExpressionFactory exprs = ExpressionFactory.getInstance();
