@@ -57,7 +57,7 @@ public class VMMLFDSTest extends AbstractCTest {
 
     @Override
     protected Provider<Solvers> getSolverProvider() {
-        return () -> Solvers.YICES2;
+        return () -> Solvers.Z3;
     }
 
     @Parameterized.Parameters(name = "{index}: {0}, target={1}")

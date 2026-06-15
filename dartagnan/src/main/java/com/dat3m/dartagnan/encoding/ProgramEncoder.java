@@ -515,7 +515,8 @@ public class ProgramEncoder {
         //final BooleanFormula data_value_formula = encodeDataValuesAssignDuplicate();
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpression();
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
-        final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiDuplicates();
+        final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiBatches();
+        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiDuplicates();
 
         final BooleanFormula dependency_formula = encodeDataDependencies();
         //final BooleanFormula dependency_formula = encodeDataDependenciesOld();
@@ -690,6 +691,74 @@ public class ProgramEncoder {
                     enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_phi));
                 }
             }
+        }
+
+        return bmgr.and(enc);
+    }
+
+    record Phi_Reader_Batch(
+            TypedFormula<?, ?> phi,
+            BooleanFormula ite_equality,
+            ArrayList<BooleanFormula> reader_equalities
+    ) {}
+
+    public BooleanFormula encodeDataValuesOnlyRightExpressionWithPhiBatches() {
+        logger.info("Encoding data values.");
+
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
+        HashMap<RegisterReadSignature, Phi_Reader_Batch> reader_signature_formulas = new HashMap<>();
+
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                final var may_writers = reg.getMayWriters();
+                final var must_writers = reg.getMustWriters();
+
+                final RegisterReadSignature signature = new RegisterReadSignature(
+                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
+                        register
+                );
+
+                final var batch = reader_signature_formulas.computeIfAbsent(signature, sig -> {
+                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
+                    Expression ite;
+
+                    if (may_writers.isEmpty()) {
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprs.makeGeneralZero(register.getType());
+                        } else {
+                            return null;
+                        }
+                    } else {
+                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
+
+                        ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, exprs.makeGeneralZero(register.getType()));
+                        }
+
+                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
+                            final var case_encoding = exprEnc.encodeAt(context.result(writer), writer);
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
+                        }
+                    }
+
+                    return new Phi_Reader_Batch(phi_var, exprEnc.assignEqual(phi_var, ite), new ArrayList<>());
+                });
+
+                if (batch != null) {
+                    var reader_equality = exprEnc.assignEqual(exprEnc.encodeAt(register, reader), batch.phi);
+                    batch.reader_equalities.add(reader_equality);
+                }
+            }
+        }
+
+        List<BooleanFormula> enc = new ArrayList<>();
+
+        for (var batch : reader_signature_formulas.values()) {
+            enc.addAll(batch.reader_equalities);
+            enc.add(batch.ite_equality);
         }
 
         return bmgr.and(enc);
