@@ -633,14 +633,6 @@ public class NativeRelationAnalysis implements RelationAnalysis {
                 }
             }
 
-            // We need to track ExecutionStatus events separately, because they induce data-dependencies
-            for (ExecutionStatus execStatus : program.getThreadEvents(ExecutionStatus.class)) {
-                if (execStatus.doesTrackDep()) {
-                    may.add(execStatus.getStatusEvent(), execStatus); // TODO: these edges have to be connected to the reduced graph, status event has to be sink?
-                    must.add(execStatus.getStatusEvent(), execStatus);
-                }
-            }
-
             return new MutableKnowledge(may, must);
         }
 
