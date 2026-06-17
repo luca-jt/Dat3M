@@ -892,7 +892,7 @@ public class ProgramEncoder {
                 for (var writer_entry : entry.getValue()) {
                     final var writer = writer_entry.getLeft();
                     if (!writer_entry.getRight()) {
-                        enc.add(bmgr.equivalence(context.dependency(writer, reader), bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)))));
+                        enc.add(bmgr.equivalence(context.dependency(writer, reader), bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite))))); // TODO: this overwrite is probably not necessary because there is only ever a single chunk border per register with an edge... or is it? rmv instructions could introduce multiple? They always seem to be seperate registers?!
                     }
                     overwrite.add(context.execution(writer));
                 }

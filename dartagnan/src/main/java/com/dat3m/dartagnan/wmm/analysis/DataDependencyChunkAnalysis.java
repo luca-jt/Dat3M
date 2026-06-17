@@ -44,7 +44,7 @@ public class DataDependencyChunkAnalysis {
         status_events = new HashSet<>();
 
 
-        for (ExecutionStatus execStatus : task.getProgram().getThreadEvents(ExecutionStatus.class)) {
+        for (ExecutionStatus execStatus : task.getProgram().getThreadEvents(ExecutionStatus.class)) { // @Speed: we could identify these on the fly by checking if the traversal recurse started from an execution status
             if (execStatus.doesTrackDep()) {
                 status_events.add(execStatus.getStatusEvent());
             }
