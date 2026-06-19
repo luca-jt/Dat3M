@@ -9,6 +9,7 @@ import com.dat3m.dartagnan.program.event.RegWriter;
 import com.dat3m.dartagnan.program.event.Tag;
 import com.dat3m.dartagnan.program.event.core.CondJump;
 import com.dat3m.dartagnan.program.event.core.ExecutionStatus;
+import com.dat3m.dartagnan.program.event.core.Label;
 import com.dat3m.dartagnan.program.event.core.Local;
 import com.dat3m.dartagnan.verification.Context;
 import com.dat3m.dartagnan.verification.VerificationTask;
@@ -31,6 +32,10 @@ public class DataDependencyChunkAnalysis {
     private final HashMap<RegReader, HashMap<Register, ArrayList<Pair<Event, Boolean>>>> reverse_edge_map;
     private final HashMap<Event, Boolean> chunk_borders;
 
+    Map<Event, Label> preceding_labels = new HashMap<>(); // for each event: the nearest Label preceding it in linear program order
+    Map<Label, List<CondJump>> jump_source_map = new HashMap<>(); // for each label: which CondJumps jump to it
+    Map<Event, Event> linear_predecessor = new HashMap<>(); // for each event its immediate linear predecessor
+
     public DataDependencyChunkAnalysis(VerificationTask t, Context context) {
         task = checkNotNull(t);
         analysisContext = context;
@@ -41,8 +46,23 @@ public class DataDependencyChunkAnalysis {
         reverse_edge_map = new HashMap<>();
         chunk_borders = new HashMap<>();
 
-        HashSet<Event> visited_events = new HashSet<>();
+        for (var thread : task.getProgram().getThreads()) {
+            Label currentLabel = null;
+            Event prev = null;
+            for (Event e : thread.getEvents()) {
+                if (prev != null) linear_predecessor.put(e, prev);
+                if (e instanceof Label label) {
+                    currentLabel = label;
+                }
+                if (currentLabel != null) preceding_labels.put(e, currentLabel);
+                if (e instanceof CondJump cj) {
+                    jump_source_map.computeIfAbsent(cj.getLabel(), k -> new ArrayList<>()).add(cj);
+                }
+                prev = e;
+            }
+        }
 
+        HashSet<Event> visited_events = new HashSet<>();
         for (RegReader possible_sink : reverse(task.getProgram().getThreadEvents(RegReader.class))) {
             if (!isPossibleCunkBorder(possible_sink)) {
                 continue;
@@ -83,7 +103,7 @@ public class DataDependencyChunkAnalysis {
             final Supplier<Boolean> value_computation = () -> {
                 if (event.hasTag(Tag.NO_CARRY_DEPS)) return false;
                 if (event.hasTag(Tag.MEMORY)) return true;
-                if (event instanceof CondJump) return true; // is not writing anyways, so these will only be sinks
+                if (event instanceof CondJump) return true;
                 if (event instanceof Local local) {
                     final var result_reg = local.getResultRegister();
                     for (RegReader reader : event.getFunction().getEvents(RegReader.class).stream()
@@ -144,9 +164,47 @@ public class DataDependencyChunkAnalysis {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 final var must_writers = reg.getMustWriters();
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    final var path_is_still_must = (is_must_path || start_is_chunk_border) && must_writers.contains(writer);
-                    addDependencyEdge(writer, new_end_border, visited_events, path_is_still_must);
+                    var is_must_writer = must_writers.contains(writer);
+
+                    if (writer instanceof Local local && !is_must_writer && !isPossibleCunkBorder(writer)) {
+                        edges_to_encode.merge(Pair.of(local, new_end_border), false, Boolean::logicalOr);
+                        if (visited_events.add(local)) {
+                            var local_reader = (RegReader) local;
+                            final ReachingDefinitionsAnalysis.Writers local_writers = definitions.getWriters(local_reader);
+                            for (Register r : local_writers.getUsedRegisters()) {
+                                final ReachingDefinitionsAnalysis.RegisterWriters regs = local_writers.ofRegister(r);
+                                for (RegWriter w : reverse(regs.getMayWriters())) {
+                                    addDependencyEdge(w, local, visited_events, false);
+                                }
+                            }
+                        }
+                    } else {
+                        final var path_is_still_must = (is_must_path || start_is_chunk_border) && is_must_writer;
+                        addDependencyEdge(writer, new_end_border, visited_events, path_is_still_must);
+                    }
                 }
+            }
+        }
+/*
+        final List<CondJump> controlling_jumps = new ArrayList<>();
+        findControllingJumps(new_start, controlling_jumps);
+        for (var jump : controlling_jumps) {
+            addDependencyEdge(jump, new_end_border, visited_events, false);
+        }*/
+    }
+
+    private void findControllingJumps(Event event, List<CondJump> jumps) {
+        Label label = preceding_labels.get(event);
+        if (label == null) return;
+
+        final List<CondJump> jumpers = jump_source_map.getOrDefault(label, List.of());
+        for (var jumper : jumpers) {
+            if (!jumper.isGoto()) {
+                jumps.add(jumper);
+            } else if (linear_predecessor.get(jumper) instanceof CondJump pcj && !pcj.isGoto()) {
+                jumps.add(pcj);
+            } else {
+                findControllingJumps(jumper, jumps);
             }
         }
     }

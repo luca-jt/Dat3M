@@ -881,8 +881,6 @@ public class ProgramEncoder {
             return bmgr.makeTrue();
         }
 
-        // - fix the idd_dynamic problem by traversing though conditional guards that govern reachability of instructions
-
         List<BooleanFormula> enc = new ArrayList<>();
 
         for (var register_map_entry : chunkAnalysis.getReverseReaderEntries()) {

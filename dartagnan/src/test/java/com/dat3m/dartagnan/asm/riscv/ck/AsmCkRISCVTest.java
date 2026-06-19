@@ -54,7 +54,7 @@ public class AsmCkRISCVTest {
 
     private VerificationTask mkTask() throws Exception {
         VerificationTask.VerificationTaskBuilder builder = VerificationTask.builder()
-                .withSolver(SolverContextFactory.Solvers.YICES2)
+                .withSolver(SolverContextFactory.Solvers.Z3)
                 .withBound(bound)
                 .withTarget(Arch.RISCV);
         Program program = new ProgramParser().parse(new File(programPath));

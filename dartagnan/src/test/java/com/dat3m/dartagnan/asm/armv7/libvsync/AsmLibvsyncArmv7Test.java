@@ -49,7 +49,7 @@ public class AsmLibvsyncArmv7Test {
             {"bounded_mpmc_check_empty", 4, PASS},
 
             //spinlocks
-            // {"caslock", 4, PASS}, // passes Refinement but takes ~10 minutes 
+            // {"caslock", 4, PASS}, // passes Refinement but takes ~10 minutes
             {"clhlock", 3, PASS},
             // {"cnalock", 5, PASS}, // takes 35 minutes
             {"hemlock", 3, PASS},
@@ -64,7 +64,7 @@ public class AsmLibvsyncArmv7Test {
             {"ttaslock", 3, PASS},
             {"twalock", 2, PASS},
 
-            //threads 
+            //threads
             {"mutex_musl", 3, PASS},
             {"mutex_slim", 2, PASS},
             {"mutex_waiters", 2, PASS},
@@ -79,7 +79,7 @@ public class AsmLibvsyncArmv7Test {
 
     private VerificationTask mkTask() throws Exception {
         VerificationTask.VerificationTaskBuilder builder = VerificationTask.builder()
-                .withSolver(SolverContextFactory.Solvers.YICES2)
+                .withSolver(SolverContextFactory.Solvers.Z3)
                 .withBound(bound)
                 .withTarget(Arch.ARM7);
         Program program = new ProgramParser().parse(new File(programPath));

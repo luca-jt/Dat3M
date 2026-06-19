@@ -57,7 +57,7 @@ public class AsmCkArmv7Test {
 
     private VerificationTask mkTask() throws Exception {
         VerificationTask.VerificationTaskBuilder builder = VerificationTask.builder()
-                .withSolver(SolverContextFactory.Solvers.YICES2)
+                .withSolver(SolverContextFactory.Solvers.Z3)
                 .withBound(bound)
                 .withTarget(Arch.ARM7);
         Program program = new ProgramParser().parse(new File(programPath));
