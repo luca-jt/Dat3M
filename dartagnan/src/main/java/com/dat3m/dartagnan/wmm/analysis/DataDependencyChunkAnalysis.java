@@ -55,8 +55,21 @@ public class DataDependencyChunkAnalysis {
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 final var must_writers = reg.getMustWriters();
+                final var may_writers_set = new HashSet<>(reg.getMayWriters());
                 for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    addDependencyEdge(writer, possible_sink, visited_events, must_writers.contains(writer) && exec.isImplied(possible_sink, writer));
+                    var is_must = must_writers.contains(writer) && exec.isImplied(possible_sink, writer);
+                    if (!is_must && writer instanceof Local local) {
+                        var local_writers = definitions.getWriters(local);
+                        outer: for (var read : local.getRegisterReads()) {
+                            for (var pred : local_writers.ofRegister(read.register()).getMustWriters()) {
+                                if (may_writers_set.contains(pred) && exec.isImplied(local, pred)) {
+                                    is_must = true;
+                                    break outer;
+                                }
+                            }
+                        }
+                    }
+                    addDependencyEdge(writer, possible_sink, visited_events, is_must);
                 }
             }
         }
