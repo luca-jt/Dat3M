@@ -114,20 +114,13 @@ public class DataDependencyChunkAnalysis {
             final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
             final var must_writers = reg.getMustWriters();
             final var may_writers = reg.getMayWriters();
+            final var may_writer_set = new HashSet<>(may_writers);
 
             for (RegWriter writer : reverse(may_writers)) {
-                var is_still_must_path = is_must_path && must_writers.contains(writer) && exec.isImplied(current_node, writer); // TODO: is this implied exec condition fine or too wide because the final may and must sets should follow the definition of must_writers? maybe use two separate flags, one for mustness in the dependency and one for the chunk border check?
+                var is_still_must_path = is_must_path && must_writers.contains(writer) && exec.isImplied(current_node, writer); // TODO: this currently uses some unnecessary edge vars, we could split must-ness and collapsibility and store execution conditions on edges that can be merged with OR if two paths meet. the collapse can happen if the conditions simplify to true... worth it? are the tautologies detectable? just check if end implies start?
 
                 if (!is_still_must_path && writer instanceof Local local) {
-                    var local_writers = definitions.getWriters(local);
-                    outer: for (var read : local.getRegisterReads()) {
-                        for (var pred : local_writers.ofRegister(read.register()).getMustWriters()) { // TODO: this whole check seems very specific to the example case
-                            if (may_writers.contains(pred) && exec.isImplied(local, pred)) {
-                                is_still_must_path = true;
-                                break outer;
-                            }
-                        }
-                    }
+                    is_still_must_path = isChainTransparent(local, register, may_writer_set);
                 }
 
                 Event possible_border = writer;
@@ -135,9 +128,9 @@ public class DataDependencyChunkAnalysis {
                     possible_border = status.getStatusEvent(); // status events are always writers tagged with MEMORY and are chunk borders
                 }
 
-                final var writer_is_chunk_border = isChunkBorder(possible_border) || (possible_border instanceof Local && !is_still_must_path); // TODO: this kind of removes the speedup improvements?!
+                final var writer_is_chunk_border = isChunkBorder(possible_border) || (possible_border instanceof Local && !is_still_must_path);
 
-                // TODO: could we track the different chains of execution conditions for collapsed edges (if a part is must, collapse, if may, track conditions. merge two different may edges with XOR for the conditions)?
+                // TODO: if we build the full graph first, we could completely reason about what edges can be collapsed and must-ness properties... this would mean the collapsing would be a graph property: find SCCs of writer families for a register and check what nodes have all predecessors inside the family and no external chunk border reads and collapse them. this would be great to combine with the edge exectution conditions and mustness separation. this would reduce node revisits during the bottom-up traversal.
 
                 var new_sink = sink;
                 if (writer_is_chunk_border) {
@@ -152,5 +145,27 @@ public class DataDependencyChunkAnalysis {
                 }
             }
         }
+    }
+
+    private boolean isChainTransparent(Local local, Register register, Set<RegWriter> sink_may_writers) {
+        final var local_writers = definitions.getWriters(local);
+        boolean reads_sink_register = false;
+
+        for (var read : local.getRegisterReads()) {
+            if (read.register() == register) {
+                // every may-source of the sinks read register must be within the family
+                for (var pred : local_writers.ofRegister(register).getMayWriters()) { // TODO: this check could be better
+                    if (!sink_may_writers.contains(pred)) return false;
+                }
+                reads_sink_register = true;
+            } else {
+                // no chunk border source of any other register falls outside the family
+                for (var pred : local_writers.ofRegister(read.register()).getMayWriters()) {
+                    if (isChunkBorder(pred) && !sink_may_writers.contains(pred)) return false; // TODO: could there be a case where isChunkBorder is not sufficient and we need the local check from above to fire here?
+                }
+            }
+        }
+
+        return reads_sink_register; // pure constant writers are never transparent
     }
 }

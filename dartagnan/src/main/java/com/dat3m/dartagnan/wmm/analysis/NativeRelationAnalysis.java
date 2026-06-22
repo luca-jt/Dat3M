@@ -629,6 +629,12 @@ public class NativeRelationAnalysis implements RelationAnalysis {
                         if (border.getRight()) {
                             must.add(border.getLeft(), reader);
                         }
+
+                        /*if (border.getRight()) {
+                            logger.info("MUST: {} -> {}", border.getLeft(), reader);
+                        } else {
+                            logger.info("MAY-ONLY: {} -> {}", border.getLeft(), reader);
+                        }*/
                     }
                 }
             }
