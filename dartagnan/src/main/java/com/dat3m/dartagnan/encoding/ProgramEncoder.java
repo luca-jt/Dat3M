@@ -514,8 +514,8 @@ public class ProgramEncoder {
         //final BooleanFormula data_value_formula = encodeDataValuesAssign();
         //final BooleanFormula data_value_formula = encodeDataValuesAssignDuplicate();
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpression();
-        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
-        final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiBatches();
+        final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
+        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiBatches();
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiDuplicates();
 
         final BooleanFormula dependency_formula = encodeDataDependencies();

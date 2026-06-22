@@ -43,7 +43,7 @@ public class DataDependencyChunkAnalysis {
 
         HashSet<Event> visited_events = new HashSet<>();
         for (RegReader possible_sink : reverse(task.getProgram().getThreadEvents(RegReader.class))) {
-            if (!isPossibleCunkBorder(possible_sink)) {
+            if (!isChunkBorder(possible_sink)) {
                 continue;
             }
             if (visited_events.contains(possible_sink)) {
@@ -51,27 +51,7 @@ public class DataDependencyChunkAnalysis {
             }
             visited_events.add(possible_sink);
 
-            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(possible_sink);
-            for (Register register : writers.getUsedRegisters()) {
-                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
-                final var must_writers = reg.getMustWriters();
-                final var may_writers_set = new HashSet<>(reg.getMayWriters());
-                for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    var is_must = must_writers.contains(writer) && exec.isImplied(possible_sink, writer);
-                    if (!is_must && writer instanceof Local local) {
-                        var local_writers = definitions.getWriters(local);
-                        outer: for (var read : local.getRegisterReads()) {
-                            for (var pred : local_writers.ofRegister(read.register()).getMustWriters()) {
-                                if (may_writers_set.contains(pred) && exec.isImplied(local, pred)) {
-                                    is_must = true;
-                                    break outer;
-                                }
-                            }
-                        }
-                    }
-                    addDependencyEdge(writer, possible_sink, visited_events, is_must);
-                }
-            }
+            addDependencyEdge(possible_sink, possible_sink, visited_events, true);
         }
 
         for (var entry : edges_to_encode.entrySet()) {
@@ -89,7 +69,7 @@ public class DataDependencyChunkAnalysis {
         }
     }
 
-    private boolean isPossibleCunkBorder(Event event) {
+    private boolean isChunkBorder(Event event) {
         final var is_chunk_border_value = chunk_borders.get(event);
         if (is_chunk_border_value == null) {
             final Supplier<Boolean> value_computation = () -> {
@@ -100,7 +80,7 @@ public class DataDependencyChunkAnalysis {
                     final var result_reg = local.getResultRegister();
                     for (RegReader reader : event.getFunction().getEvents(RegReader.class).stream()
                             .filter(r -> r.getLocalId() > local.getLocalId())
-                            .filter(this::isPossibleCunkBorder)
+                            .filter(this::isChunkBorder)
                             .toList()
                     ) {
                         final var fitting_read = reader.getRegisterReads().stream()
@@ -128,31 +108,47 @@ public class DataDependencyChunkAnalysis {
         return edges_to_encode.isEmpty();
     }
 
-    private void addDependencyEdge(Event start, RegReader end_border, HashSet<Event> visited_events, boolean is_must_path) {
-        var new_start = start;
+    private void addDependencyEdge(RegReader current_node, RegReader sink, HashSet<Event> visited_events, boolean is_must_path) {
+        final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(current_node);
+        for (Register register : writers.getUsedRegisters()) {
+            final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+            final var must_writers = reg.getMustWriters();
+            final var may_writers = reg.getMayWriters();
 
-        if (start instanceof ExecutionStatus status && status.doesTrackDep()) {
-            new_start = status.getStatusEvent(); // status events are always writers tagged with MEMORY and are chunk borders
-        }
+            for (RegWriter writer : reverse(may_writers)) {
+                var is_still_must_path = is_must_path && must_writers.contains(writer) && exec.isImplied(current_node, writer); // TODO: is this implied exec condition fine or too wide because the final may and must sets should follow the definition of must_writers? maybe use two separate flags, one for mustness in the dependency and one for the chunk border check?
 
-        var new_end_border = end_border;
-        final var start_is_chunk_border = isPossibleCunkBorder(new_start) || (new_start instanceof Local && !is_must_path); // TODO: this kind of removes the speedup improvements?!
+                if (!is_still_must_path && writer instanceof Local local) {
+                    var local_writers = definitions.getWriters(local);
+                    outer: for (var read : local.getRegisterReads()) {
+                        for (var pred : local_writers.ofRegister(read.register()).getMustWriters()) { // TODO: this whole check seems very specific to the example case
+                            if (may_writers.contains(pred) && exec.isImplied(local, pred)) {
+                                is_still_must_path = true;
+                                break outer;
+                            }
+                        }
+                    }
+                }
 
-        if (start_is_chunk_border) {
-            final var edge_key = Pair.of(new_start, end_border);
-            edges_to_encode.merge(edge_key, is_must_path, (a, b) -> b || a);
-            if (!visited_events.add(new_start)) return; // early return to prohibit exponential loops for cmpxchgs with status events
-            if (new_start instanceof RegReader reader) new_end_border = reader;
-        }
+                Event possible_border = writer;
+                if (possible_border instanceof ExecutionStatus status && status.doesTrackDep()) {
+                    possible_border = status.getStatusEvent(); // status events are always writers tagged with MEMORY and are chunk borders
+                }
 
-        if (new_start instanceof RegReader reader) {
-            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
-            for (Register register : writers.getUsedRegisters()) {
-                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
-                final var must_writers = reg.getMustWriters();
-                for (RegWriter writer : reverse(reg.getMayWriters())) {
-                    final var path_is_still_must = (is_must_path || start_is_chunk_border) && must_writers.contains(writer) && exec.isImplied(new_end_border, writer);
-                    addDependencyEdge(writer, new_end_border, visited_events, path_is_still_must);
+                final var writer_is_chunk_border = isChunkBorder(possible_border) || (possible_border instanceof Local && !is_still_must_path); // TODO: this kind of removes the speedup improvements?!
+
+                // TODO: could we track the different chains of execution conditions for collapsed edges (if a part is must, collapse, if may, track conditions. merge two different may edges with XOR for the conditions)?
+
+                var new_sink = sink;
+                if (writer_is_chunk_border) {
+                    final var edge_key = Pair.of(possible_border, sink);
+                    edges_to_encode.merge(edge_key, is_still_must_path, (a, b) -> b || a);
+                    if (!visited_events.add(possible_border)) continue; // early return to prohibit exponential loops for cmpxchgs with status events
+                    if (possible_border instanceof RegReader reader) new_sink = reader;
+                }
+
+                if (possible_border instanceof RegReader reader) {
+                    addDependencyEdge(reader, new_sink, visited_events, is_still_must_path || writer_is_chunk_border);
                 }
             }
         }
