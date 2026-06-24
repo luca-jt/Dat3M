@@ -27,9 +27,8 @@ public class DataDependencyChunkAnalysis {
     protected final ExecutionAnalysis exec;
     protected final ReachingDefinitionsAnalysis definitions;
 
-    private final HashMap<Pair<Event, RegReader>, Boolean> edges_to_encode; // booleans store must-ness, edges are (if so) writer -> reader
-    private final HashMap<RegReader, HashMap<Register, ArrayList<Pair<Event, Boolean>>>> reverse_edge_map;
-    private final HashMap<Event, Boolean> chunk_borders;
+    private final Map<Pair<Event, RegReader>, List<PathCondition>> edges_to_encode; // edges are (if so) writer -> reader
+    private final Map<Event, Boolean> chunk_borders;
 
     public DataDependencyChunkAnalysis(VerificationTask t, Context context) {
         task = checkNotNull(t);
@@ -38,34 +37,19 @@ public class DataDependencyChunkAnalysis {
         definitions = context.requires(ReachingDefinitionsAnalysis.class);
 
         edges_to_encode = new HashMap<>();
-        reverse_edge_map = new HashMap<>();
         chunk_borders = new HashMap<>();
 
-        HashSet<Event> visited_events = new HashSet<>();
+        final HashSet<Event> visited_sinks = new HashSet<>();
         for (RegReader possible_sink : reverse(task.getProgram().getThreadEvents(RegReader.class))) {
             if (!isChunkBorder(possible_sink)) {
                 continue;
             }
-            if (visited_events.contains(possible_sink)) {
+            if (visited_sinks.contains(possible_sink)) {
                 continue;
             }
-            visited_events.add(possible_sink);
+            visited_sinks.add(possible_sink);
 
-            addDependencyEdge(possible_sink, possible_sink, visited_events, true);
-        }
-
-        for (var entry : edges_to_encode.entrySet()) {
-            final RegReader reader = entry.getKey().getRight();
-            final var border = entry.getKey().getLeft();
-            final var border_register_key = border instanceof RegWriter reg_writer ? reg_writer.getResultRegister() : null;
-            final var is_must = entry.getValue();
-            final var writer_map = reverse_edge_map.computeIfAbsent(reader, r -> new HashMap<>());
-            final var writer_list = writer_map.computeIfAbsent(border_register_key, r -> new ArrayList<>());
-            writer_list.add(Pair.of(border, is_must));
-        }
-
-        for (var to_list : reverse_edge_map.values().stream().flatMap(map -> map.values().stream()).toList()) {
-            to_list.sort((c1, c2) -> c2.getLeft().compareTo(c1.getLeft())); // reverse program order
+            addDependencyEdge(possible_sink, possible_sink, visited_sinks, new PathCondition(Set.of(), Set.of()));
         }
     }
 
@@ -100,14 +84,7 @@ public class DataDependencyChunkAnalysis {
         }
     }
 
-    public Set<Map.Entry<RegReader, HashMap<Register, ArrayList<Pair<Event, Boolean>>>>> getReverseReaderEntries() {
-        return reverse_edge_map.entrySet();
-    }
-
-    public boolean hasNoEdgesToEncode() {
-        return edges_to_encode.isEmpty();
-    }
-
+    /*
     private void addDependencyEdge(RegReader current_node, RegReader sink, HashSet<Event> visited_events, boolean is_must_path) {
         final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(current_node);
         for (Register register : writers.getUsedRegisters()) {
@@ -128,9 +105,24 @@ public class DataDependencyChunkAnalysis {
                     possible_border = status.getStatusEvent(); // status events are always writers tagged with MEMORY and are chunk borders
                 }
 
-                final var writer_is_chunk_border = isChunkBorder(possible_border) || (possible_border instanceof Local && !is_still_must_path);
+                final var writer_is_chunk_border = isChunkBorder(possible_border) || (possible_border instanceof Local && !is_still_must_path); // TODO: the only reason this works for now is because this makes the overwrite appear in the encoding
 
-                // TODO: if we build the full graph first, we could completely reason about what edges can be collapsed and must-ness properties... this would mean the collapsing would be a graph property: find SCCs of writer families for a register and check what nodes have all predecessors inside the family and no external chunk border reads and collapse them. this would be great to combine with the edge exectution conditions and mustness separation. this would reduce node revisits during the bottom-up traversal.
+                // TODO: build the entire graph bottom-up
+                // do collapsing through true must edges on the fly, otherwhise, add edges to graph with execution conditions using all writers (multiple collapsed links are ANDed)
+                // on a join of two paths check if all execution condtions OR'ed are true
+                // tree gets simplified to O(2^n) direct edges with the conditions that connect chunk borders
+                // structural must-edges should be tracked with conditions as well, store the structural must-ness per-edge
+                // if execution conditions on path meet simplify to true, no edge variable is needed
+                // bridging implication chains by ANDing structural must-ness on paths so simplify conditions later on (maybe caching of the full condition is needed for collapse checks)
+                // the collapse checks could be aided by graph structure checks??
+                // use a variable if there is a single structural non-must edge on a path
+
+                // conditional must determines if the implication chain can be briged, structural must-ness determines if there needs to be a variable
+                // on every link that you look at, if the link is conditional may-only, add an execution condition, if the link is structural may-only, add an overwrite condition
+                // the adding of the overwrites can be reduced by using the chain transparency function
+                // skip the overwrite condition if it is mutually exclusive to the sink
+                // if we need a new execution condition, check if the execution is not already implied by some other execution that we recorded as required on this path???
+                // if two paths are merged, remove execution conditions if one path requires and one path forbids
 
                 var new_sink = sink;
                 if (writer_is_chunk_border) {
@@ -145,27 +137,86 @@ public class DataDependencyChunkAnalysis {
                 }
             }
         }
+    }*/
+
+    public Set<Map.Entry<Pair<Event, RegReader>, List<PathCondition>>> getEdgesToEncode() {
+        return edges_to_encode.entrySet();
     }
 
-    private boolean isChainTransparent(Local local, Register register, Set<RegWriter> sink_may_writers) {
-        final var local_writers = definitions.getWriters(local);
-        boolean reads_sink_register = false;
+    private void addDependencyEdge(RegReader current_node, RegReader sink, HashSet<Event> visited_events, PathCondition built_condition) {
+        final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(current_node);
+        for (Register register : writers.getUsedRegisters()) {
+            final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+            final var may_writers = reg.getMayWriters();
+            final List<Event> overwrites = new ArrayList<>();
 
-        for (var read : local.getRegisterReads()) {
-            if (read.register() == register) {
-                // every may-source of the sinks read register must be within the family
-                for (var pred : local_writers.ofRegister(register).getMayWriters()) { // TODO: this check could be better
-                    if (!sink_may_writers.contains(pred)) return false;
+            for (RegWriter writer : reverse(may_writers)) {
+                final var path_condition = new PathCondition(built_condition);
+
+                for (var overwrite : overwrites) {
+                    if (!exec.areMutuallyExclusive(overwrite, writer)) {
+                        path_condition.forbidden().add(overwrite); // TODO: iterate in reverse and only add overwrites that do not imply the excution of an already added one?
+                    }
                 }
-                reads_sink_register = true;
-            } else {
-                // no chunk border source of any other register falls outside the family
-                for (var pred : local_writers.ofRegister(read.register()).getMayWriters()) {
-                    if (isChunkBorder(pred) && !sink_may_writers.contains(pred)) return false; // TODO: could there be a case where isChunkBorder is not sufficient and we need the local check from above to fire here?
+
+                final Event possible_border = (writer instanceof ExecutionStatus status && status.doesTrackDep()) ? status.getStatusEvent() : writer; // status events are always writers tagged with MEMORY and are chunk borders
+
+                var updated_sink = sink;
+                var updated_path_condition = path_condition;
+
+                if (isChunkBorder(possible_border)) {
+                    final var edge_key = Pair.of(possible_border, sink);
+                    final var condition_list = edges_to_encode.computeIfAbsent(edge_key, k -> new ArrayList<>());
+                    final Set<Event> removed_from_new = new HashSet<>();
+
+                    condition_list.removeIf(existing_condition -> {
+                        final Set<Event> forbidden_existing_required = new HashSet<>(existing_condition.required());
+                        forbidden_existing_required.retainAll(path_condition.forbidden());
+                        final Set<Event> forbidden_new_required = new HashSet<>(path_condition.required());
+                        forbidden_new_required.retainAll(existing_condition.forbidden());
+
+                        removed_from_new.addAll(forbidden_existing_required); // remove tautologies
+                        removed_from_new.addAll(forbidden_new_required);
+
+                        existing_condition.required().removeAll(forbidden_existing_required);
+                        existing_condition.forbidden().removeAll(forbidden_new_required);
+
+                        return existing_condition.isStructAndCondMust();
+                    });
+
+                    path_condition.required().removeAll(removed_from_new);
+                    path_condition.forbidden().removeAll(removed_from_new);
+
+                    if (!path_condition.isStructAndCondMust()) {
+                        condition_list.add(path_condition);
+                    }
+
+                    /*
+                    transitive case: a single pair merge does not produce an empty condition
+                    A: x
+                    B: y, ¬x
+                    C: z, ¬y, ¬x
+                    */
+
+                    if (!visited_events.add(possible_border)) continue; // early return to prohibit exponential loops for cmpxchgs with status events
+                    if (possible_border instanceof RegReader reader) {
+                        updated_sink = reader;
+                        updated_path_condition = new PathCondition(Set.of(), Set.of());
+                    }
+                } else {
+                    final var is_conditionally_must = exec.isImplied(current_node, possible_border);
+                    if (!is_conditionally_must) {
+                        //var is_already_implied = path_condition.required().stream().anyMatch(req -> exec.isImplied(req, possible_border));
+                        path_condition.required().add(possible_border);
+                    }
                 }
+
+                if (possible_border instanceof RegReader reader) {
+                    addDependencyEdge(reader, updated_sink, visited_events, updated_path_condition);
+                }
+
+                if (!exec.areMutuallyExclusive(current_node, possible_border)) overwrites.add(possible_border);
             }
         }
-
-        return reads_sink_register; // pure constant writers are never transparent
     }
 }

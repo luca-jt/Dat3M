@@ -877,25 +877,23 @@ public class ProgramEncoder {
     public BooleanFormula encodeDataDependencies() {
         logger.info("Encoding data dependencies.");
 
-        if (chunkAnalysis.hasNoEdgesToEncode()) {
-            return bmgr.makeTrue();
-        }
-
         List<BooleanFormula> enc = new ArrayList<>();
 
-        for (var register_map_entry : chunkAnalysis.getReverseReaderEntries()) {
-            final var reader = register_map_entry.getKey();
-            final var register_map = register_map_entry.getValue();
+        for (var edge_entry : chunkAnalysis.getEdgesToEncode()) {
+            final var is_must = edge_entry.getValue().isEmpty();
+            if (is_must) {
+                final var from = edge_entry.getKey().getLeft();
+                final var to = edge_entry.getKey().getRight();
 
-            for (var entry : register_map.entrySet()) {
-                final List<BooleanFormula> overwrite = new ArrayList<>();
-                for (var writer_entry : entry.getValue()) {
-                    final var writer = writer_entry.getLeft();
-                    if (!writer_entry.getRight()) {
-                        enc.add(bmgr.equivalence(context.dependency(writer, reader), bmgr.and(context.execution(writer), context.controlFlow(reader), bmgr.not(bmgr.or(overwrite)))));
-                    }
-                    if (entry.getKey() != null) overwrite.add(context.execution(writer));
+                final List<BooleanFormula> path_encodings = new ArrayList<>();
+                for (var path_condition : edge_entry.getValue()) {
+                    final List<BooleanFormula> path_cond_formulas = new ArrayList<>(path_condition.required().stream().map(context::execution).toList());
+                    final List<BooleanFormula> forbidden = path_condition.forbidden().stream().map(context::execution).toList();
+                    path_cond_formulas.add(bmgr.not(bmgr.or(forbidden)));
+                    path_encodings.add(bmgr.and(path_cond_formulas));
                 }
+
+                enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(context.execution(from), context.controlFlow(to), bmgr.or(path_encodings))));
             }
         }
 
