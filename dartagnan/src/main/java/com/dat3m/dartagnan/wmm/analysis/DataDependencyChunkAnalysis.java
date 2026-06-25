@@ -12,11 +12,13 @@ import com.dat3m.dartagnan.program.event.core.ExecutionStatus;
 import com.dat3m.dartagnan.program.event.core.Local;
 import com.dat3m.dartagnan.verification.Context;
 import com.dat3m.dartagnan.verification.VerificationTask;
+import com.google.common.collect.BiMap;
+import com.google.common.collect.HashBiMap;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
 import java.util.function.Supplier;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Lists.reverse;
@@ -31,6 +33,8 @@ public class DataDependencyChunkAnalysis {
     private final Map<Pair<Event, RegReader>, List<PathCondition>> edges_to_encode; // edges are (if so) writer -> reader
     private final Map<Event, Boolean> chunk_borders;
     private final Set<Event> visited_sinks;
+    private final int event_count;
+    private final BiMap<Event, Integer> event_bit_indices;
 
     public DataDependencyChunkAnalysis(VerificationTask t, Context context) {
         task = checkNotNull(t);
@@ -38,9 +42,17 @@ public class DataDependencyChunkAnalysis {
         exec = context.requires(ExecutionAnalysis.class);
         definitions = context.requires(ReachingDefinitionsAnalysis.class);
 
+        final var all_events = task.getProgram().getThreadEvents();
+
         edges_to_encode = new HashMap<>();
         chunk_borders = new HashMap<>();
         visited_sinks = new HashSet<>();
+        event_count = all_events.size();
+        event_bit_indices = HashBiMap.create(event_count);
+
+        for (int i = 0; i < all_events.size(); i++) {
+            event_bit_indices.put(all_events.get(i), i);
+        }
 
         for (RegReader possible_sink : reverse(task.getProgram().getThreadEvents(RegReader.class))) {
             if (!isChunkBorder(possible_sink)) {
@@ -51,17 +63,21 @@ public class DataDependencyChunkAnalysis {
             }
             visited_sinks.add(possible_sink);
 
-            addDependencyEdge(possible_sink, possible_sink, new PathCondition(new HashSet<>(), new HashSet<>()));
+            addDependencyEdge(possible_sink, possible_sink, PathCondition.from_size(event_count));
         }
 
         edges_to_encode.forEach((key, condition_list) -> {
-            final Set<Event> intersection = condition_list.stream().flatMap(c -> c.required().stream()).collect(Collectors.toSet());
-            final Set<Event> all_forbidden = condition_list.stream().flatMap(c -> c.forbidden().stream()).collect(Collectors.toSet());
-            intersection.retainAll(all_forbidden); // remove tautologies
+            final BitSet intersection = new BitSet(event_count);
+            condition_list.stream().map(PathCondition::required).forEach(intersection::or);
+
+            final BitSet all_forbidden = new BitSet(event_count);
+            condition_list.stream().map(PathCondition::forbidden).forEach(all_forbidden::or);
+
+            intersection.and(all_forbidden); // remove tautologies
 
             condition_list.removeIf(existing_condition -> {
-                existing_condition.required().removeAll(intersection);
-                existing_condition.forbidden().removeAll(intersection);
+                existing_condition.required().andNot(intersection);
+                existing_condition.forbidden().andNot(intersection);
                 return existing_condition.isStructAndCondMust();
             });
 
@@ -138,19 +154,33 @@ public class DataDependencyChunkAnalysis {
         return edges_to_encode.entrySet();
     }
 
+    private void addEvent(BitSet bits, Event event) {
+        final var index = event_bit_indices.get(event);
+        bits.set(index);
+    }
+
+    private void removeEvent(BitSet bits, Event event) {
+        final var index = event_bit_indices.get(event);
+        bits.set(index, false);
+    }
+
+    public Stream<Event> eventStreamOfSet(BitSet set) {
+        return set.stream().mapToObj(i -> event_bit_indices.inverse().get(i));
+    }
+
     private void addDependencyEdge(RegReader current_node, RegReader sink, PathCondition path_condition) {
         final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(current_node);
         for (Register register : writers.getUsedRegisters()) {
             final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
             final var may_writers = reg.getMayWriters();
-            final List<Event> overwrites = new ArrayList<>();
+            final List<Event> overwrites = new LinkedList<>();
 
             for (RegWriter writer : reverse(may_writers)) {
-                final var overwrites_added = new HashSet<Event>();
+                final BitSet overwrites_added_bits = new BitSet(event_count);
                 for (var overwrite : reverse(overwrites)) {
-                    if (!exec.areMutuallyExclusive(overwrite, writer) && overwrites_added.stream().noneMatch(added -> exec.isImplied(overwrite, added))) {
-                        path_condition.forbidden().add(overwrite);
-                        overwrites_added.add(overwrite);
+                    if (!exec.areMutuallyExclusive(overwrite, writer) && eventStreamOfSet(overwrites_added_bits).noneMatch(added -> exec.isImplied(overwrite, added))) {
+                        addEvent(path_condition.forbidden(), overwrite);
+                        addEvent(overwrites_added_bits, overwrite);
                     }
                 }
 
@@ -162,21 +192,27 @@ public class DataDependencyChunkAnalysis {
 
                 if (isChunkBorder(possible_border)) {
                     final var edge_key = Pair.of(possible_border, sink);
-                    final var condition_list = edges_to_encode.computeIfAbsent(edge_key, k -> new ArrayList<>());
+                    final var condition_list = edges_to_encode.computeIfAbsent(edge_key, k -> new LinkedList<>());
                     if (!path_condition.isStructAndCondMust()) {
                         condition_list.add(new PathCondition(path_condition));
+                    } else {
+                        condition_list.clear();
                     }
 
                     if (!visited_sinks.add(possible_border)) continue; // early return to prohibit exponential loops for cmpxchgs with status events
 
                     if (possible_border instanceof RegReader reader) {
                         updated_sink = reader;
-                        updated_path_condition = new PathCondition(new HashSet<>(), new HashSet<>());
+                        updated_path_condition = PathCondition.from_size(event_count);
                     }
-                } else {
-                    if (!is_conditionally_must) {
-                        //var is_already_implied = path_condition.required().stream().anyMatch(req -> exec.isImplied(req, possible_border));
-                        path_condition.required().add(possible_border);
+                } else if (!is_conditionally_must) {
+                    var is_already_implied = eventStreamOfSet(path_condition.required()).anyMatch(req -> exec.isImplied(req, possible_border));
+                    if (!is_already_implied) {
+                        addEvent(path_condition.required(), possible_border);
+                    } else {
+                        removeEvent(path_condition.required(), possible_border);
+                        path_condition.forbidden().andNot(overwrites_added_bits); // TODO: memoize sub-paths
+                        continue;
                     }
                 }
 
@@ -185,9 +221,9 @@ public class DataDependencyChunkAnalysis {
                 }
 
                 if (!is_conditionally_must) {
-                    path_condition.required().remove(possible_border);
+                    removeEvent(path_condition.required(), possible_border);
                 }
-                overwrites_added.forEach(path_condition.forbidden()::remove);
+                path_condition.forbidden().andNot(overwrites_added_bits);
 
                 overwrites.add(possible_border);
             }

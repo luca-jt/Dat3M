@@ -887,8 +887,8 @@ public class ProgramEncoder {
 
                 final List<BooleanFormula> path_encodings = new ArrayList<>();
                 for (var path_condition : edge_entry.getValue()) {
-                    final List<BooleanFormula> path_cond_formulas = new ArrayList<>(path_condition.required().stream().map(context::execution).toList());
-                    final List<BooleanFormula> forbidden = path_condition.forbidden().stream().map(context::execution).toList();
+                    final List<BooleanFormula> path_cond_formulas = new ArrayList<>(chunkAnalysis.eventStreamOfSet(path_condition.required()).map(context::execution).toList());
+                    final List<BooleanFormula> forbidden = chunkAnalysis.eventStreamOfSet(path_condition.forbidden()).map(context::execution).toList();
                     path_cond_formulas.add(bmgr.not(bmgr.or(forbidden)));
                     path_encodings.add(bmgr.and(path_cond_formulas));
                 }

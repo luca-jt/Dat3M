@@ -1,16 +1,17 @@
 package com.dat3m.dartagnan.wmm.analysis;
 
-import com.dat3m.dartagnan.program.event.Event;
+import java.util.BitSet;
 
-import java.util.HashSet;
-import java.util.Set;
-
-public record PathCondition(Set<Event> required, Set<Event> forbidden) {
+public record PathCondition(BitSet required, BitSet forbidden) {
     public boolean isStructAndCondMust() {
         return required.isEmpty() && forbidden.isEmpty();
     }
 
     public PathCondition(PathCondition other) {
-        this(new HashSet<>(other.required), new HashSet<>(other.forbidden));
+        this((BitSet) other.required.clone(), (BitSet) other.forbidden.clone());
+    }
+
+    public static PathCondition from_size(int size) {
+        return new PathCondition(new BitSet(size), new BitSet(size));
     }
 }
