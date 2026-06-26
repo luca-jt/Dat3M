@@ -14,4 +14,14 @@ public record PathCondition(BitSet required, BitSet forbidden) {
     public static PathCondition from_size(int size) {
         return new PathCondition(new BitSet(size), new BitSet(size));
     }
+
+    public void merge(PathCondition other) {
+        required.or(other.required);
+        forbidden.or(other.forbidden);
+    }
+
+    public void remove(PathCondition other) {
+        required.andNot(other.required);
+        forbidden.andNot(other.forbidden);
+    }
 }

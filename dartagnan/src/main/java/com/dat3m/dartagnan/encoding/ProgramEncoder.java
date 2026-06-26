@@ -19,6 +19,7 @@ import com.dat3m.dartagnan.program.event.core.threading.*;
 import com.dat3m.dartagnan.program.memory.Memory;
 import com.dat3m.dartagnan.program.memory.MemoryObject;
 import com.dat3m.dartagnan.verification.Context;
+import com.dat3m.dartagnan.wmm.RelationNameRepository;
 import com.dat3m.dartagnan.wmm.analysis.DataDependencyChunkAnalysis;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
@@ -511,6 +512,8 @@ public class ProgramEncoder {
     public BooleanFormula encodeDataFlow() {
         logger.info("Encoding data flow.");
 
+        var dependencies_are_relevant = context.getTask().getMemoryModel().containsRelation(RelationNameRepository.IDD);
+
         //final BooleanFormula data_value_formula = encodeDataValuesAssign();
         //final BooleanFormula data_value_formula = encodeDataValuesAssignDuplicate();
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpression();
@@ -518,10 +521,13 @@ public class ProgramEncoder {
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiBatches();
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiDuplicates();
 
-        final BooleanFormula dependency_formula = encodeDataDependencies();
-        //final BooleanFormula dependency_formula = encodeDataDependenciesOld();
-
-        return bmgr.and(data_value_formula, dependency_formula);
+        if (dependencies_are_relevant) {
+            final BooleanFormula dependency_formula = encodeDataDependencies();
+            //final BooleanFormula dependency_formula = encodeDataDependenciesOld();
+            return bmgr.and(data_value_formula, dependency_formula);
+        } else {
+            return data_value_formula;
+        }
     }
 
     public BooleanFormula encodeDataValuesAssignDuplicate() {
@@ -659,7 +665,7 @@ public class ProgramEncoder {
                 );
 
                 final var reader_phi = reader_signature_formulas.computeIfAbsent(signature, sig -> {
-                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
+                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType()); // TODO: resuse parts of the ite expression through phi vars
                     Expression ite;
 
                     if (may_writers.isEmpty()) {
@@ -887,8 +893,8 @@ public class ProgramEncoder {
 
                 final List<BooleanFormula> path_encodings = new ArrayList<>();
                 for (var path_condition : edge_entry.getValue()) {
-                    final List<BooleanFormula> path_cond_formulas = new ArrayList<>(chunkAnalysis.eventStreamOfSet(path_condition.required()).map(context::execution).toList());
-                    final List<BooleanFormula> forbidden = chunkAnalysis.eventStreamOfSet(path_condition.forbidden()).map(context::execution).toList();
+                    final List<BooleanFormula> path_cond_formulas = new ArrayList<>(chunkAnalysis.eventStreamOfSet(path_condition.required(), from.getThread()).map(context::execution).toList());
+                    final List<BooleanFormula> forbidden = chunkAnalysis.eventStreamOfSet(path_condition.forbidden(), from.getThread()).map(context::execution).toList();
                     path_cond_formulas.add(bmgr.not(bmgr.or(forbidden)));
                     path_encodings.add(bmgr.and(path_cond_formulas));
                 }
