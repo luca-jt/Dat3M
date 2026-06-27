@@ -41,6 +41,7 @@ public class DataDependencyChunkAnalysis {
     private boolean analysis_ran = false;
     private final Map<RegReader, List<ConditionToBorder>> known_subpaths;
     private com.dat3m.dartagnan.program.Thread current_thread = null;
+    private final Map<RegWriter, Integer> unvisited_reader_count;
 
     record ConditionToBorder(PathCondition condition, Event border) {}
 
@@ -55,6 +56,7 @@ public class DataDependencyChunkAnalysis {
         visited_sinks = new HashSet<>();
         event_bit_indices = new HashMap<>();
         known_subpaths = new HashMap<>();
+        unvisited_reader_count = new HashMap<>();
     }
 
     private void runAnalysis() {
@@ -78,6 +80,9 @@ public class DataDependencyChunkAnalysis {
 
         for (var event : task.getProgram().getThreadEvents(RegReader.class)) { // only readers can be sinks
             thread_sink_events.get(event.getThread()).add(event);
+
+            final var writers = definitions.getWriters(event);
+            writers.getUsedRegisters().stream().flatMap(r -> writers.ofRegister(r).getMayWriters().stream()).forEach(writer -> unvisited_reader_count.merge(writer, 1, Integer::sum));
         }
 
         for (var entry : thread_sink_events.entrySet()) {
@@ -90,6 +95,8 @@ public class DataDependencyChunkAnalysis {
                 bit_index_map.put(all_condition_events.get(i), i); // TODO: add a field to Event for the index to avoid hashing
             }
             known_subpaths.clear();
+            chunk_borders.clear();
+            visited_sinks.clear();
             final Map<Pair<RegReader, Register>, List<RegWriter>> writer_cache = new HashMap<>();
 
             for (RegReader possible_sink : reverse(sink_event_list)) {
@@ -183,10 +190,7 @@ public class DataDependencyChunkAnalysis {
 
         final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(current_node);
         for (Register register : writers.getUsedRegisters()) {
-            final var may_writers = writer_cache.computeIfAbsent(Pair.of(current_node, register), p -> {
-                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(p.getRight());
-                return reg.getMayWriters();
-            });
+            final var may_writers = writer_cache.computeIfAbsent(Pair.of(current_node, register), p -> writers.ofRegister(p.getRight()).getMayWriters());
 
             final BitSet overwrites = new BitSet(event_count);
 
@@ -222,6 +226,7 @@ public class DataDependencyChunkAnalysis {
                         addEvent(link_condition.required(), possible_border);
                     } else {
                         condition_to_add_link_to.remove(link_condition);
+                        maybeReleaseKnownPaths(possible_border);
                         continue;
                     }
                 }
@@ -236,13 +241,19 @@ public class DataDependencyChunkAnalysis {
                         var subpaths_from_reader = known_subpaths.get(reader);
                         if (subpaths_from_reader == null) {
                             subpaths_from_reader = addDependencyEdge(reader, sink_for_next_call, accumulated_condition_for_next_call, writer_cache);
-                            known_subpaths.put(reader, subpaths_from_reader); // TODO: store how many accesses can exist and when it can be deleted, only put lists in the map for events that have multiple readers
+                            if (possible_border instanceof RegWriter border_writer && unvisited_reader_count.getOrDefault(border_writer, 0) > 1) {
+                                known_subpaths.put(reader, subpaths_from_reader);
+                            }
                         }
+
+                        maybeReleaseKnownPaths(possible_border);
 
                         final List<ConditionToBorder> subpaths_to_add_to_current = updateConditionsToBorders(subpaths_from_reader, link_condition);
                         paths_from_current.addAll(subpaths_to_add_to_current);
                     }
                 }
+
+                logger.info("SUBPATHS: {}", known_subpaths.size());
 
                 if (!is_chunk_border) {
                     condition_to_add_link_to.remove(link_condition);
@@ -265,7 +276,16 @@ public class DataDependencyChunkAnalysis {
             return List.of();
         }
 
+        if (paths_from_current.isEmpty()) return List.of(); // TODO: only store link conditions? still exponential memory...
+
         return paths_from_current;
+    }
+
+    private void maybeReleaseKnownPaths(Event possible_border) {
+        if (possible_border instanceof RegWriter border_writer && possible_border instanceof RegReader reader) {
+            final var new_value = unvisited_reader_count.computeIfPresent(border_writer, (w, i) -> i > 1 ? i - 1 : null);
+            if (new_value == null) known_subpaths.remove(reader); // TODO: somehow the map does not shrink in the manyRegReads example... wrong?
+        }
     }
 
     private static List<ConditionToBorder> updateConditionsToBorders(List<ConditionToBorder> subpaths_from_reader, PathCondition link_condition) {
