@@ -14,6 +14,7 @@ import com.google.common.base.Verify;
 import com.google.common.collect.Iterables;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Collects all direct usage relationships between {@link RegWriter} and {@link RegReader}.
@@ -131,7 +132,9 @@ class BackwardsReachingDefinitionsAnalysis implements ReachingDefinitionsAnalysi
         private final Set<Register> uninitialized = new HashSet<>();
 
         private ReaderInfo(Set<Register> u) {
-            used = Set.copyOf(u);
+            used = u.stream()
+                    .sorted(Comparator.comparing(Register::getName))
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
         }
 
         @Override

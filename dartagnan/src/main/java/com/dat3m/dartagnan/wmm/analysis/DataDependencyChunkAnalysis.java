@@ -51,7 +51,7 @@ public class DataDependencyChunkAnalysis {
         exec = context.requires(ExecutionAnalysis.class);
         definitions = context.requires(ReachingDefinitionsAnalysis.class);
 
-        edges_to_encode = new HashMap<>();
+        edges_to_encode = new LinkedHashMap<>();
         chunk_borders = new HashMap<>();
         visited_sinks = new HashSet<>();
         event_bit_indices = new HashMap<>();
@@ -73,7 +73,7 @@ public class DataDependencyChunkAnalysis {
         }
 
         task.getProgram().getThreadEvents().stream().map(e -> {
-            if (e instanceof ExecutionStatus status) return status.getStatusEvent(); // only writers and status events can be in the sets
+            if (e instanceof ExecutionStatus status && status.doesTrackDep()) return status.getStatusEvent(); // only writers and status events can be in the sets
             if (e instanceof RegWriter) return e;
             return null;
         }).filter(Objects::nonNull).forEach(event -> thread_condition_events.get(event.getThread()).add(event));
@@ -92,7 +92,7 @@ public class DataDependencyChunkAnalysis {
             event_count = all_condition_events.size();
             final var bit_index_map = event_bit_indices.computeIfAbsent(current_thread, t -> HashBiMap.create(event_count));
             for (int i = 0; i < all_condition_events.size(); i++) {
-                bit_index_map.put(all_condition_events.get(i), i); // TODO: add a field to Event for the index to avoid hashing
+                bit_index_map.put(all_condition_events.get(i), i);
             }
             known_subpaths.clear();
             chunk_borders.clear();
@@ -207,11 +207,9 @@ public class DataDependencyChunkAnalysis {
                 var sink_for_next_call = sink;
                 var accumulated_condition_for_next_call = accumulated_condition;
                 final var is_chunk_border = isChunkBorder(possible_border);
-                var condition_to_add_link_to = accumulated_condition;
 
                 if (is_chunk_border) {
-                    condition_to_add_link_to = new PathCondition(accumulated_condition);
-                    final var condition_to_border = new ConditionToBorder(condition_to_add_link_to, possible_border);
+                    final var condition_to_border = new ConditionToBorder(new PathCondition(accumulated_condition), possible_border);
                     paths_from_current.add(condition_to_border);
 
                     if (!visited_sinks.add(possible_border)) continue; // early return to prohibit exponential loops for cmpxchgs with status events
@@ -224,14 +222,14 @@ public class DataDependencyChunkAnalysis {
                     var is_already_implied = eventStreamOfSet(accumulated_condition.required(), current_thread).anyMatch(req -> exec.isImplied(req, possible_border)); // TODO: the accumulated_condition parameter only exists for this expensive check...
                     if (!is_already_implied) {
                         addEvent(link_condition.required(), possible_border);
+                        accumulated_condition.required().or(link_condition.required());
                     } else {
-                        condition_to_add_link_to.remove(link_condition);
+                        accumulated_condition.forbidden().andNot(overwrites);
                         maybeReleaseKnownPaths(possible_border);
+                        addEvent(overwrites, possible_border);
                         continue;
                     }
                 }
-
-                condition_to_add_link_to.merge(link_condition);
 
                 if (possible_border instanceof RegReader reader) {
                     if (is_chunk_border) {
@@ -253,12 +251,7 @@ public class DataDependencyChunkAnalysis {
                     }
                 }
 
-                logger.info("SUBPATHS: {}", known_subpaths.size());
-
-                if (!is_chunk_border) {
-                    condition_to_add_link_to.remove(link_condition);
-                }
-
+                accumulated_condition.remove(link_condition);
                 addEvent(overwrites, possible_border);
             }
         }
@@ -276,7 +269,7 @@ public class DataDependencyChunkAnalysis {
             return List.of();
         }
 
-        if (paths_from_current.isEmpty()) return List.of(); // TODO: only store link conditions? still exponential memory...
+        if (paths_from_current.isEmpty()) return List.of();
 
         return paths_from_current;
     }
@@ -284,7 +277,7 @@ public class DataDependencyChunkAnalysis {
     private void maybeReleaseKnownPaths(Event possible_border) {
         if (possible_border instanceof RegWriter border_writer && possible_border instanceof RegReader reader) {
             final var new_value = unvisited_reader_count.computeIfPresent(border_writer, (w, i) -> i > 1 ? i - 1 : null);
-            if (new_value == null) known_subpaths.remove(reader); // TODO: somehow the map does not shrink in the manyRegReads example... wrong?
+            if (new_value == null) known_subpaths.remove(reader);
         }
     }
 

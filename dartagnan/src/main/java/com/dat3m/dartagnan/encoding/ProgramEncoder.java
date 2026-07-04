@@ -505,8 +505,7 @@ public class ProgramEncoder {
     }
 
     record RegisterReadSignature(
-            List<Pair<Integer, Boolean>> writer_ids_with_must_flag,
-            Register register
+            List<Integer> writer_ids
     ) {}
 
     public BooleanFormula encodeDataFlow() {
@@ -542,11 +541,9 @@ public class ProgramEncoder {
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 final var may_writers = reg.getMayWriters();
-                final var must_writers = reg.getMustWriters();
 
                 final RegisterReadSignature signature = new RegisterReadSignature(
-                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
-                        register
+                        may_writers.stream().map(Event::getGlobalId).toList()
                 );
 
                 final var ite_and_reader_var = reader_signature_formulas.computeIfAbsent(signature, sig -> {
@@ -599,11 +596,9 @@ public class ProgramEncoder {
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 final var may_writers = reg.getMayWriters();
-                final var must_writers = reg.getMustWriters();
 
                 final RegisterReadSignature signature = new RegisterReadSignature(
-                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
-                        register
+                        may_writers.stream().map(Event::getGlobalId).toList()
                 );
 
                 final var reader_var = reader_signature_formulas.computeIfAbsent(signature, sig -> {
@@ -645,30 +640,59 @@ public class ProgramEncoder {
         return bmgr.and(enc);
     }
 
+    private static class PhiPrefixTrie {
+        private final Map<Integer, PhiPrefixTrie> children = new HashMap<>();
+        private TypedFormula<?, ?> phi; // non-null iff some signature ends exactly here
+    }
+
     public BooleanFormula encodeDataValuesOnlyRightExpressionWithPhi() {
         logger.info("Encoding data values.");
 
         final ExpressionFactory exprs = ExpressionFactory.getInstance();
         List<BooleanFormula> enc = new ArrayList<>();
         HashMap<RegisterReadSignature, TypedFormula<?, ?>> reader_signature_formulas = new HashMap<>();
+        final var phiPrefixTrie = new PhiPrefixTrie();
 
         for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 final var may_writers = reg.getMayWriters();
-                final var must_writers = reg.getMustWriters();
 
                 final RegisterReadSignature signature = new RegisterReadSignature(
-                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
-                        register
+                        may_writers.stream().map(Event::getGlobalId).toList() // must writer check unneeded, register is implied
                 );
 
                 final var reader_phi = reader_signature_formulas.computeIfAbsent(signature, sig -> {
-                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType()); // TODO: resuse parts of the ite expression through phi vars
+                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
                     Expression ite;
 
-                    if (may_writers.isEmpty()) {
+                    final var existing_phi_for_writer_signature_prefix = reader_signature_formulas
+                            .entrySet()
+                            .stream()
+                            .filter(e -> !e.getKey().writer_ids().isEmpty()) // TODO: faster search fixes ms speed
+                            .map(e -> {
+                                final var existing_writer_ids = e.getKey().writer_ids();
+                                final var new_writer_ids = sig.writer_ids();
+
+                                if (existing_writer_ids.size() > new_writer_ids.size()) return null;
+                                for (int i = 0; i < existing_writer_ids.size(); i++) {
+                                    if (!Objects.equals(new_writer_ids.get(i), existing_writer_ids.get(i))) return null;
+                                }
+
+                                return Pair.of(new_writer_ids.size() - existing_writer_ids.size(), e.getValue());
+                            })
+                            .filter(Objects::nonNull)
+                            .reduce((p1, p2) -> p1.getLeft() < p2.getLeft() ? p1 : p2);
+
+                    if (existing_phi_for_writer_signature_prefix.isPresent()) {
+                        final var num_writers_left_to_encode = existing_phi_for_writer_signature_prefix.get().getLeft();
+                        ite = existing_phi_for_writer_signature_prefix.get().getRight(); // at this point there will be at least one additional writer
+                        for (var additional_writer : may_writers.subList(may_writers.size() - num_writers_left_to_encode, may_writers.size())) {
+                            final var case_encoding = exprEnc.encodeAt(context.result(additional_writer), additional_writer);
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(additional_writer)), case_encoding, ite);
+                        }
+                    } else if (may_writers.isEmpty()) {
                         if (initializeRegisters && !reg.mustBeInitialized()) {
                             ite = exprs.makeGeneralZero(register.getType());
                         } else {
@@ -719,11 +743,9 @@ public class ProgramEncoder {
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 final var may_writers = reg.getMayWriters();
-                final var must_writers = reg.getMustWriters();
 
                 final RegisterReadSignature signature = new RegisterReadSignature(
-                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
-                        register
+                        may_writers.stream().map(Event::getGlobalId).toList()
                 );
 
                 final var batch = reader_signature_formulas.computeIfAbsent(signature, sig -> {
@@ -782,11 +804,9 @@ public class ProgramEncoder {
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 final var may_writers = reg.getMayWriters();
-                final var must_writers = reg.getMustWriters();
 
                 final RegisterReadSignature signature = new RegisterReadSignature(
-                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
-                        register
+                        may_writers.stream().map(Event::getGlobalId).toList()
                 );
 
                 final var reader_phi_and_ite = reader_signature_formulas.computeIfAbsent(signature, sig -> {
@@ -838,11 +858,9 @@ public class ProgramEncoder {
             for (Register register : writers.getUsedRegisters()) {
                 final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
                 final var may_writers = reg.getMayWriters();
-                final var must_writers = reg.getMustWriters();
 
                 final RegisterReadSignature signature = new RegisterReadSignature(
-                        reverse(may_writers).stream().map(w -> Pair.of(w.getGlobalId(), must_writers.contains(w))).toList(),
-                        register
+                        may_writers.stream().map(Event::getGlobalId).toList()
                 );
 
                 final var reader_ite = reader_signature_formulas.computeIfAbsent(signature, sig -> {
