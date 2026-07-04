@@ -25,7 +25,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.sosy_lab.common.configuration.InvalidConfigurationException;
@@ -514,11 +513,8 @@ public class ProgramEncoder {
         var dependencies_are_relevant = context.getTask().getMemoryModel().containsRelation(RelationNameRepository.IDD);
 
         //final BooleanFormula data_value_formula = encodeDataValuesAssign();
-        //final BooleanFormula data_value_formula = encodeDataValuesAssignDuplicate();
         //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpression();
         final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
-        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiBatches();
-        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiDuplicates();
 
         if (dependencies_are_relevant) {
             final BooleanFormula dependency_formula = encodeDataDependencies();
@@ -527,61 +523,6 @@ public class ProgramEncoder {
         } else {
             return data_value_formula;
         }
-    }
-
-    public BooleanFormula encodeDataValuesAssignDuplicate() {
-        logger.info("Encoding data values.");
-
-        final ExpressionFactory exprs = ExpressionFactory.getInstance();
-        List<BooleanFormula> enc = new ArrayList<>();
-        HashMap<RegisterReadSignature, Pair<BooleanFormula, TypedFormula<?, ?>>> reader_signature_formulas = new HashMap<>();
-
-        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
-            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
-            for (Register register : writers.getUsedRegisters()) {
-                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
-                final var may_writers = reg.getMayWriters();
-
-                final RegisterReadSignature signature = new RegisterReadSignature(
-                        may_writers.stream().map(Event::getGlobalId).toList()
-                );
-
-                final var ite_and_reader_var = reader_signature_formulas.computeIfAbsent(signature, sig -> {
-                    final var reader_var = exprEnc.makeVariable("reader_merge_" + reader_signature_formulas.size(), register.getType());
-                    BooleanFormula ite;
-
-                    if (may_writers.isEmpty()) {
-                        if (initializeRegisters && !reg.mustBeInitialized()) {
-                            ite = exprEnc.assignEqual(reader_var, exprs.makeGeneralZero(register.getType()));
-                        } else {
-                            return null;
-                        }
-                    } else {
-                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
-
-                        ite = exprEnc.assignEqual(reader_var, exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order));
-                        if (initializeRegisters && !reg.mustBeInitialized()) {
-                            final var zero_case = exprEnc.assignEqual(reader_var, exprs.makeGeneralZero(register.getType()));
-                            ite = bmgr.ifThenElse(context.execution(last_writer_in_reverse_order), ite, zero_case);
-                        }
-
-                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
-                            final var case_encoding = exprEnc.assignEqual(reader_var, exprEnc.encodeAt(context.result(writer), writer));
-                            ite = bmgr.ifThenElse(context.execution(writer), case_encoding, ite);
-                        }
-                    }
-
-                    return Pair.of(ite, reader_var);
-                });
-
-                if (ite_and_reader_var != null) {
-                    enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), ite_and_reader_var.getRight()));
-                    enc.add(ite_and_reader_var.getLeft());
-                }
-            }
-        }
-
-        return bmgr.and(enc);
     }
 
     public BooleanFormula encodeDataValuesAssign() {
@@ -651,7 +592,7 @@ public class ProgramEncoder {
         final ExpressionFactory exprs = ExpressionFactory.getInstance();
         List<BooleanFormula> enc = new ArrayList<>();
         HashMap<RegisterReadSignature, TypedFormula<?, ?>> reader_signature_formulas = new HashMap<>();
-        final var phiPrefixTrie = new PhiPrefixTrie();
+        final var phi_prefix_trie = new PhiPrefixTrie();
 
         for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
             final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
@@ -664,39 +605,35 @@ public class ProgramEncoder {
                 );
 
                 final var reader_phi = reader_signature_formulas.computeIfAbsent(signature, sig -> {
+                    if (may_writers.isEmpty()) {
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
+                            enc.add(exprEnc.assignEqual(phi_var, exprs.makeGeneralZero(register.getType())));
+                            return phi_var;
+                        } else {
+                            return null;
+                        }
+                    }
+
+                    var node = phi_prefix_trie;
+                    TypedFormula<?, ?> longest_prefix_phi = null;
+                    int longest_prefix_len = 0;
+                    for (int depth = 0; depth < sig.writer_ids().size(); depth++) {
+                        if (depth >= 1 && node.phi != null) {
+                            longest_prefix_phi = node.phi;
+                            longest_prefix_len = depth;
+                        }
+                        node = node.children.computeIfAbsent(sig.writer_ids().get(depth), k -> new PhiPrefixTrie());
+                    }
+
                     final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
                     Expression ite;
 
-                    final var existing_phi_for_writer_signature_prefix = reader_signature_formulas
-                            .entrySet()
-                            .stream()
-                            .filter(e -> !e.getKey().writer_ids().isEmpty()) // TODO: faster search fixes ms speed
-                            .map(e -> {
-                                final var existing_writer_ids = e.getKey().writer_ids();
-                                final var new_writer_ids = sig.writer_ids();
-
-                                if (existing_writer_ids.size() > new_writer_ids.size()) return null;
-                                for (int i = 0; i < existing_writer_ids.size(); i++) {
-                                    if (!Objects.equals(new_writer_ids.get(i), existing_writer_ids.get(i))) return null;
-                                }
-
-                                return Pair.of(new_writer_ids.size() - existing_writer_ids.size(), e.getValue());
-                            })
-                            .filter(Objects::nonNull)
-                            .reduce((p1, p2) -> p1.getLeft() < p2.getLeft() ? p1 : p2);
-
-                    if (existing_phi_for_writer_signature_prefix.isPresent()) {
-                        final var num_writers_left_to_encode = existing_phi_for_writer_signature_prefix.get().getLeft();
-                        ite = existing_phi_for_writer_signature_prefix.get().getRight(); // at this point there will be at least one additional writer
-                        for (var additional_writer : may_writers.subList(may_writers.size() - num_writers_left_to_encode, may_writers.size())) {
+                    if (longest_prefix_phi != null) {
+                        ite = longest_prefix_phi; // at this point there will be at least one additional writer
+                        for (var additional_writer : may_writers.subList(longest_prefix_len, may_writers.size())) {
                             final var case_encoding = exprEnc.encodeAt(context.result(additional_writer), additional_writer);
                             ite = exprs.makeITE(exprEnc.wrap(context.execution(additional_writer)), case_encoding, ite);
-                        }
-                    } else if (may_writers.isEmpty()) {
-                        if (initializeRegisters && !reg.mustBeInitialized()) {
-                            ite = exprs.makeGeneralZero(register.getType());
-                        } else {
-                            return null;
                         }
                     } else {
                         final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
@@ -713,132 +650,12 @@ public class ProgramEncoder {
                     }
 
                     enc.add(exprEnc.assignEqual(phi_var, ite));
-
+                    node.phi = phi_var;
                     return phi_var;
                 });
 
                 if (reader_phi != null) {
                     enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_phi));
-                }
-            }
-        }
-
-        return bmgr.and(enc);
-    }
-
-    record Phi_Reader_Batch(
-            TypedFormula<?, ?> phi,
-            BooleanFormula ite_equality,
-            ArrayList<BooleanFormula> reader_equalities
-    ) {}
-
-    public BooleanFormula encodeDataValuesOnlyRightExpressionWithPhiBatches() {
-        logger.info("Encoding data values.");
-
-        final ExpressionFactory exprs = ExpressionFactory.getInstance();
-        HashMap<RegisterReadSignature, Phi_Reader_Batch> reader_signature_formulas = new HashMap<>();
-
-        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
-            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
-            for (Register register : writers.getUsedRegisters()) {
-                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
-                final var may_writers = reg.getMayWriters();
-
-                final RegisterReadSignature signature = new RegisterReadSignature(
-                        may_writers.stream().map(Event::getGlobalId).toList()
-                );
-
-                final var batch = reader_signature_formulas.computeIfAbsent(signature, sig -> {
-                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
-                    Expression ite;
-
-                    if (may_writers.isEmpty()) {
-                        if (initializeRegisters && !reg.mustBeInitialized()) {
-                            ite = exprs.makeGeneralZero(register.getType());
-                        } else {
-                            return null;
-                        }
-                    } else {
-                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
-
-                        ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
-                        if (initializeRegisters && !reg.mustBeInitialized()) {
-                            ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, exprs.makeGeneralZero(register.getType()));
-                        }
-
-                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
-                            final var case_encoding = exprEnc.encodeAt(context.result(writer), writer);
-                            ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
-                        }
-                    }
-
-                    return new Phi_Reader_Batch(phi_var, exprEnc.assignEqual(phi_var, ite), new ArrayList<>());
-                });
-
-                if (batch != null) {
-                    var reader_equality = exprEnc.assignEqual(exprEnc.encodeAt(register, reader), batch.phi);
-                    batch.reader_equalities.add(reader_equality);
-                }
-            }
-        }
-
-        List<BooleanFormula> enc = new ArrayList<>();
-
-        for (var batch : reader_signature_formulas.values()) {
-            enc.addAll(batch.reader_equalities);
-            enc.add(batch.ite_equality);
-        }
-
-        return bmgr.and(enc);
-    }
-
-    public BooleanFormula encodeDataValuesOnlyRightExpressionWithPhiDuplicates() {
-        logger.info("Encoding data values.");
-
-        final ExpressionFactory exprs = ExpressionFactory.getInstance();
-        List<BooleanFormula> enc = new ArrayList<>();
-        HashMap<RegisterReadSignature, Pair<TypedFormula<?, ?>, Expression>> reader_signature_formulas = new HashMap<>();
-
-        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
-            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
-            for (Register register : writers.getUsedRegisters()) {
-                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
-                final var may_writers = reg.getMayWriters();
-
-                final RegisterReadSignature signature = new RegisterReadSignature(
-                        may_writers.stream().map(Event::getGlobalId).toList()
-                );
-
-                final var reader_phi_and_ite = reader_signature_formulas.computeIfAbsent(signature, sig -> {
-                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
-                    Expression ite;
-
-                    if (may_writers.isEmpty()) {
-                        if (initializeRegisters && !reg.mustBeInitialized()) {
-                            ite = exprs.makeGeneralZero(register.getType());
-                        } else {
-                            return null;
-                        }
-                    } else {
-                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
-
-                        ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
-                        if (initializeRegisters && !reg.mustBeInitialized()) {
-                            ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, exprs.makeGeneralZero(register.getType()));
-                        }
-
-                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
-                            final var case_encoding = exprEnc.encodeAt(context.result(writer), writer);
-                            ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
-                        }
-                    }
-
-                    return Pair.of(phi_var, ite);
-                });
-
-                if (reader_phi_and_ite != null) {
-                    enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_phi_and_ite.getLeft()));
-                    enc.add(exprEnc.assignEqual(reader_phi_and_ite.getLeft(), reader_phi_and_ite.getRight()));
                 }
             }
         }
