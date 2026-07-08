@@ -190,11 +190,10 @@ public class Wmm {
             case CASDEP -> new CASDependency(r);
             case SI -> new SameInstruction(r);
             case CRIT -> new LinuxCriticalSections(r);
-            case IDD -> new DirectDataDependency(r);
+            case IDD, IDDTRANS -> new DirectDataDependency(r);
             case ADDRDIRECT -> new DirectAddressDependency(r);
             case CTRLDIRECT -> new DirectControlDependency(r);
             case EMPTY -> new Empty(r);
-            case IDDTRANS -> new TransitiveClosure(r, getOrCreatePredefinedRelation(IDD));
             case DATA -> {
                 final Relation memory = getOrCreatePredefinedRelation(MEMORY);
                 yield new Intersection(r, getOrCreatePredefinedRelation(IDDTRANS), product(memory, memory));

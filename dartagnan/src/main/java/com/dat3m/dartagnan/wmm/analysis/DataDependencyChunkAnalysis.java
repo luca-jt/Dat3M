@@ -102,14 +102,9 @@ public class DataDependencyChunkAnalysis {
             final Map<Pair<RegReader, Register>, List<RegWriter>> writer_cache = new HashMap<>();
 
             for (RegReader possible_sink : reverse(sink_event_list)) {
-                if (!isChunkBorder(possible_sink)) {
-                    continue;
-                }
-                if (visited_sinks.contains(possible_sink)) {
-                    continue;
-                }
+                if (!isChunkBorder(possible_sink)) continue;
+                if (visited_sinks.contains(possible_sink)) continue;
                 visited_sinks.add(possible_sink);
-
                 addDependencyEdge(possible_sink, possible_sink, PathCondition.from_size(event_count), writer_cache);
             }
         }
@@ -209,7 +204,6 @@ public class DataDependencyChunkAnalysis {
                 }
 
                 // TODO: try only stored links
-                // TODO: tackle failing tests
                 // TODO: premature merge only better for worst case examples?
 
                 if (possible_border instanceof RegReader reader) {

@@ -33,8 +33,6 @@ import com.dat3m.dartagnan.wmm.definition.*;
 import com.dat3m.dartagnan.wmm.utils.Dimension;
 import com.dat3m.dartagnan.wmm.utils.Tuple;
 import com.dat3m.dartagnan.wmm.utils.graph.EventGraph;
-import com.dat3m.dartagnan.wmm.utils.graph.mutable.MapEventGraph;
-import com.dat3m.dartagnan.wmm.utils.graph.mutable.MutableEventGraph;
 import com.dat3m.dartagnan.wmm.utils.graph.mutable.IndexedEventGraph;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -623,8 +621,8 @@ public class NativeRelationAnalysis implements RelationAnalysis {
             MutableKnowledge data_knowledge = computeDependencyChunkDependencies(); // DATA
             MutableKnowledge ctrl_knowledge = computeInternalDependencies(EnumSet.of(CTRL, OTHER));
 
-            MutableEventGraph may = new MapEventGraph();
-            MutableEventGraph must = new MapEventGraph();
+            final IndexedEventGraph may = new IndexedEventGraph(allEvents);
+            final IndexedEventGraph must = new IndexedEventGraph(allEvents);
 
             may.addAll(data_knowledge.getMaySet());
             may.addAll(ctrl_knowledge.getMaySet());
@@ -635,8 +633,8 @@ public class NativeRelationAnalysis implements RelationAnalysis {
         }
 
         private MutableKnowledge computeDependencyChunkDependencies() {
-            MutableEventGraph may = new MapEventGraph();
-            MutableEventGraph must = new MapEventGraph();
+            final IndexedEventGraph may = new IndexedEventGraph(allEvents);
+            final IndexedEventGraph must = new IndexedEventGraph(allEvents);
 
             chunkAnalysis.getEdgesToEncode().forEach(edge_entry -> {
                 final var is_must = edge_entry.getValue().isEmpty();
