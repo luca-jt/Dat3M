@@ -7,6 +7,7 @@ import com.dat3m.dartagnan.encoding.IREvaluator;
 import com.dat3m.dartagnan.program.Program;
 import com.dat3m.dartagnan.program.Thread;
 import com.dat3m.dartagnan.program.analysis.BranchEquivalence;
+import com.dat3m.dartagnan.program.analysis.EventDomainRepository;
 import com.dat3m.dartagnan.program.analysis.ExecutionAnalysis;
 import com.dat3m.dartagnan.program.analysis.ReachingDefinitionsAnalysis;
 import com.dat3m.dartagnan.program.analysis.ThreadSymmetry;
@@ -21,6 +22,7 @@ import com.dat3m.dartagnan.verification.VerificationTask;
 import com.dat3m.dartagnan.wmm.Wmm;
 import com.dat3m.dartagnan.wmm.analysis.DataDependencyChunkAnalysis;
 import com.dat3m.dartagnan.wmm.analysis.RelationAnalysis;
+import com.dat3m.dartagnan.wmm.analysis.RelationEventDomains;
 import com.dat3m.dartagnan.wmm.analysis.WmmAnalysis;
 import com.dat3m.dartagnan.wmm.processing.WmmProcessingManager;
 
@@ -173,6 +175,7 @@ public abstract class ModelChecker implements AutoCloseable {
 
     public static void performStaticProgramAnalyses(VerificationTask task, Context analysisContext, Configuration config) throws InvalidConfigurationException {
         final Program program = task.getProgram();
+        analysisContext.register(EventDomainRepository.class, EventDomainRepository.forProgram(program));
         analysisContext.register(BranchEquivalence.class, BranchEquivalence.fromConfig(program, config));
         analysisContext.register(ExecutionAnalysis.class, ExecutionAnalysis.fromConfig(program, task.getProgressModel(),
                 analysisContext, config));
@@ -193,6 +196,7 @@ public abstract class ModelChecker implements AutoCloseable {
 
     public static void performStaticWmmAnalyses(VerificationTask task, Context analysisContext, Configuration config) throws InvalidConfigurationException {
         analysisContext.register(WmmAnalysis.class, WmmAnalysis.fromConfig(task.getMemoryModel(), task.getProgram().getArch(), config));
+        analysisContext.register(RelationEventDomains.class, RelationEventDomains.newInstance(task.getMemoryModel(), analysisContext));
         analysisContext.register(DataDependencyChunkAnalysis.class, new DataDependencyChunkAnalysis(task, analysisContext)); // @Note(luca): hacky insertion here
         analysisContext.register(RelationAnalysis.class, RelationAnalysis.fromConfig(task, analysisContext, config));
     }
