@@ -33,7 +33,7 @@ public class DataDependencyChunkAnalysis {
     protected final ExecutionAnalysis exec;
     protected final ReachingDefinitionsAnalysis definitions;
 
-    private final Map<Pair<Event, RegReader>, List<PathCondition>> edges_to_encode; // edges are (if so) writer -> reader
+    private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode; // edges are (if so) writer -> reader
     private final Map<Event, Boolean> chunk_borders;
     private final Set<Event> visited_sinks;
     private int event_count = -1;
@@ -44,6 +44,8 @@ public class DataDependencyChunkAnalysis {
     private final Map<RegWriter, Integer> unvisited_reader_count;
 
     record ConditionToBorder(PathCondition condition, Event border) {}
+
+    record EdgeEncodingInfo(List<PathCondition> conditions, BitSet eliminated_bits) {} // this way we don't need exponentially many conditions stored and we can prematurely eliminate stuff
 
     public DataDependencyChunkAnalysis(VerificationTask t, Context context) {
         task = checkNotNull(t);
@@ -112,37 +114,15 @@ public class DataDependencyChunkAnalysis {
             }
         }
 
-        edges_to_encode.forEach((key, condition_list) -> {
-            final BitSet intersection = new BitSet(event_count);
-            condition_list.stream().map(PathCondition::required).forEach(intersection::or);
-
-            final BitSet all_forbidden = new BitSet(event_count);
-            condition_list.stream().map(PathCondition::forbidden).forEach(all_forbidden::or);
-
-            intersection.and(all_forbidden); // remove tautologies
-
-            condition_list.removeIf(existing_condition -> {
-                existing_condition.required().andNot(intersection);
-                existing_condition.forbidden().andNot(intersection);
-                return existing_condition.isStructAndCondMust();
-            });
-
-            if (!condition_list.isEmpty()) {
-                final var unique = new HashSet<>(condition_list);
-                condition_list.clear();
-                condition_list.addAll(unique);
-            }
-        });
-
         logger.info("End of DataDependencyAnalysis");
     }
 
-    public Set<Map.Entry<Pair<Event, RegReader>, List<PathCondition>>> getEdgesToEncode() {
+    public Stream<Pair<Pair<Event, RegReader>, List<PathCondition>>> getEdgesToEncode() {
         if (!analysis_ran) {
             runAnalysis();
             analysis_ran = true;
         }
-        return edges_to_encode.entrySet();
+        return edges_to_encode.entrySet().stream().map(p -> Pair.of(p.getKey(), p.getValue().conditions()));
     }
 
     private void addEvent(BitSet bits, Event event) {
@@ -168,11 +148,8 @@ public class DataDependencyChunkAnalysis {
                             .filter(this::isChunkBorder)
                             .toList()
                     ) {
-                        final var fitting_read = reader.getRegisterReads().stream()
-                                .filter(read -> read.register() == result_reg && read.usageType() == Register.UsageType.ADDR)
-                                .findAny();
-
-                        if (fitting_read.isPresent()) return true;
+                        final var fitting_read_is_present = reader.getRegisterReads().stream().anyMatch(read -> read.register() == result_reg && read.usageType() == Register.UsageType.ADDR);
+                        if (fitting_read_is_present) return true;
                     }
                 }
                 return false;
@@ -209,27 +186,31 @@ public class DataDependencyChunkAnalysis {
                 final var is_chunk_border = isChunkBorder(possible_border);
 
                 if (is_chunk_border) {
-                    final var condition_to_border = new ConditionToBorder(new PathCondition(accumulated_condition), possible_border);
+                    final var condition_to_border = new ConditionToBorder(new PathCondition(link_condition), possible_border);
                     paths_from_current.add(condition_to_border);
 
-                    if (!visited_sinks.add(possible_border)) continue; // early return to prohibit exponential loops for cmpxchgs with status events
+                    if (!visited_sinks.add(possible_border)) continue; // early return to prohibit multiple visits
 
                     if (possible_border instanceof RegReader reader) {
                         sink_for_next_call = reader;
                         accumulated_condition_for_next_call = PathCondition.from_size(event_count);
                     }
                 } else if (!is_conditionally_must) {
-                    var is_already_implied = eventStreamOfSet(accumulated_condition.required(), current_thread).anyMatch(req -> exec.isImplied(req, possible_border)); // TODO: the accumulated_condition parameter only exists for this expensive check...
-                    if (!is_already_implied) {
-                        addEvent(link_condition.required(), possible_border);
-                        accumulated_condition.required().or(link_condition.required());
-                    } else {
+                    if (possible_border instanceof RegReader && eventStreamOfSet(accumulated_condition.required(), current_thread).anyMatch(req -> req == possible_border)) { // TODO: this check fine?
+                        // essentially white/grey/black DFS to avoid loops like in the safe_stack example
                         accumulated_condition.forbidden().andNot(overwrites);
                         maybeReleaseKnownPaths(possible_border);
                         addEvent(overwrites, possible_border);
                         continue;
+                    } else {
+                        addEvent(link_condition.required(), possible_border);
+                        accumulated_condition.required().or(link_condition.required());
                     }
                 }
+
+                // TODO: try only stored links
+                // TODO: tackle failing tests
+                // TODO: premature merge only better for worst case examples?
 
                 if (possible_border instanceof RegReader reader) {
                     if (is_chunk_border) {
@@ -259,11 +240,33 @@ public class DataDependencyChunkAnalysis {
         if (current_node == sink) {
             for (var condition_to_border : paths_from_current) {
                 final var edge_key = Pair.of(condition_to_border.border, sink);
-                final var condition_list = edges_to_encode.computeIfAbsent(edge_key, k -> new ArrayList<>());
+                final var info = edges_to_encode.computeIfAbsent(edge_key, k -> new EdgeEncodingInfo(new ArrayList<>(2), new BitSet(event_count))); // most of the time there are only one or two paths
                 if (!condition_to_border.condition.isStructAndCondMust()) {
-                    condition_list.add(condition_to_border.condition);
+                    info.conditions().add(condition_to_border.condition);
+
+                    // prematurely eliminate stuff and remove tautologies
+                    final BitSet intersection = new BitSet(event_count);
+                    info.conditions().stream().map(PathCondition::required).forEach(intersection::or);
+
+                    final BitSet all_forbidden = new BitSet(event_count);
+                    info.conditions().stream().map(PathCondition::forbidden).forEach(all_forbidden::or);
+
+                    intersection.and(all_forbidden);
+                    info.eliminated_bits().or(intersection);
+
+                    info.conditions().removeIf(existing_condition -> {
+                        existing_condition.required().andNot(info.eliminated_bits());
+                        existing_condition.forbidden().andNot(info.eliminated_bits());
+                        return existing_condition.isStructAndCondMust();
+                    });
+
+                    if (!info.conditions().isEmpty()) {
+                        final var unique = new HashSet<>(info.conditions());
+                        info.conditions().clear();
+                        info.conditions().addAll(unique);
+                    }
                 } else {
-                    condition_list.clear();
+                    info.conditions().clear();
                 }
             }
             return List.of();

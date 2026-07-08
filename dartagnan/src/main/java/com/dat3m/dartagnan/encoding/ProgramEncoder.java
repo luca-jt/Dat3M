@@ -607,12 +607,9 @@ public class ProgramEncoder {
                 final var reader_phi = reader_signature_formulas.computeIfAbsent(signature, sig -> {
                     if (may_writers.isEmpty()) {
                         if (initializeRegisters && !reg.mustBeInitialized()) {
-                            final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
-                            enc.add(exprEnc.assignEqual(phi_var, exprs.makeGeneralZero(register.getType())));
-                            return phi_var;
-                        } else {
-                            return null;
+                            enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), exprs.makeGeneralZero(register.getType())));
                         }
+                        return null;
                     }
 
                     var node = phi_prefix_trie;
@@ -720,23 +717,20 @@ public class ProgramEncoder {
 
         List<BooleanFormula> enc = new ArrayList<>();
 
-        for (var edge_entry : chunkAnalysis.getEdgesToEncode()) {
-            final var is_must = edge_entry.getValue().isEmpty();
-            if (is_must) {
-                final var from = edge_entry.getKey().getLeft();
-                final var to = edge_entry.getKey().getRight();
+        chunkAnalysis.getEdgesToEncode().filter(e -> !e.getValue().isEmpty()).forEach(edge_entry -> {
+            final var from = edge_entry.getKey().getLeft();
+            final var to = edge_entry.getKey().getRight();
 
-                final List<BooleanFormula> path_encodings = new ArrayList<>();
-                for (var path_condition : edge_entry.getValue()) {
-                    final List<BooleanFormula> path_cond_formulas = new ArrayList<>(chunkAnalysis.eventStreamOfSet(path_condition.required(), from.getThread()).map(context::execution).toList());
-                    final List<BooleanFormula> forbidden = chunkAnalysis.eventStreamOfSet(path_condition.forbidden(), from.getThread()).map(context::execution).toList();
-                    path_cond_formulas.add(bmgr.not(bmgr.or(forbidden)));
-                    path_encodings.add(bmgr.and(path_cond_formulas));
-                }
-
-                enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(context.execution(from), context.controlFlow(to), bmgr.or(path_encodings))));
+            final List<BooleanFormula> path_encodings = new ArrayList<>();
+            for (var path_condition : edge_entry.getValue()) {
+                final List<BooleanFormula> path_cond_formulas = new ArrayList<>(chunkAnalysis.eventStreamOfSet(path_condition.required(), from.getThread()).map(context::execution).toList());
+                final List<BooleanFormula> forbidden = chunkAnalysis.eventStreamOfSet(path_condition.forbidden(), from.getThread()).map(context::execution).toList();
+                path_cond_formulas.add(bmgr.not(bmgr.or(forbidden)));
+                path_encodings.add(bmgr.and(path_cond_formulas));
             }
-        }
+
+            enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(context.execution(from), context.controlFlow(to), bmgr.or(path_encodings))));
+        });
 
         return bmgr.and(enc);
     }

@@ -618,7 +618,7 @@ public class NativeRelationAnalysis implements RelationAnalysis {
             MutableEventGraph may = new MapEventGraph();
             MutableEventGraph must = new MapEventGraph();
 
-            for (var edge_entry : chunkAnalysis.getEdgesToEncode()) {
+            chunkAnalysis.getEdgesToEncode().forEach(edge_entry -> {
                 final var is_must = edge_entry.getValue().isEmpty();
                 final var from = edge_entry.getKey().getLeft();
                 final var to = edge_entry.getKey().getRight();
@@ -630,7 +630,7 @@ public class NativeRelationAnalysis implements RelationAnalysis {
                 } else {
                     logger.info("MAY-ONLY: {} -> {}", from, to);
                 }
-            }
+            });
 
             return new MutableKnowledge(may, must);
         }
