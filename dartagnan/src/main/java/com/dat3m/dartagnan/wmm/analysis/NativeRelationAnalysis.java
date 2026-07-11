@@ -606,47 +606,41 @@ public class NativeRelationAnalysis implements RelationAnalysis {
             return new MutableKnowledge(must, newGraph(must));
         }
 
-        @Override
+        /*@Override
         public MutableKnowledge visitAddressDependency(DirectAddressDependency addrDep) {
             return computeInternalDependencies(EnumSet.of(ADDR));
-        }
-/*
+        }*/
+
         @Override
+        public MutableKnowledge visitAddressDependency(DirectAddressDependency addrDep) {
+            return computeDependencyChunkDependencies(DataDependencyChunkAnalysis.AddrLinkKind.NONE);
+        }
+
+        /*@Override
         public MutableKnowledge visitInternalDataDependency(DirectDataDependency idd) {
             return computeInternalDependencies(EnumSet.of(CTRL, DATA, OTHER));
         }*/
 
         @Override
         public MutableKnowledge visitInternalDataDependency(DirectDataDependency idd) {
-            MutableKnowledge data_knowledge = computeDependencyChunkDependencies(); // DATA
-            MutableKnowledge ctrl_knowledge = computeInternalDependencies(EnumSet.of(CTRL, OTHER));
-
-            final IndexedEventGraph may = new IndexedEventGraph(allEvents);
-            final IndexedEventGraph must = new IndexedEventGraph(allEvents);
-
-            may.addAll(data_knowledge.getMaySet());
-            may.addAll(ctrl_knowledge.getMaySet());
-            must.addAll(data_knowledge.getMustSet());
-            must.addAll(ctrl_knowledge.getMustSet());
-
-            return new MutableKnowledge(may, must);
+            return computeDependencyChunkDependencies(DataDependencyChunkAnalysis.AddrLinkKind.PURE);
         }
 
-        private MutableKnowledge computeDependencyChunkDependencies() {
+        private MutableKnowledge computeDependencyChunkDependencies(DataDependencyChunkAnalysis.AddrLinkKind exclude_link_kind) {
             final IndexedEventGraph may = new IndexedEventGraph(allEvents);
             final IndexedEventGraph must = new IndexedEventGraph(allEvents);
 
-            chunkAnalysis.getEdgesToEncode().forEach(edge_entry -> {
-                final var is_must = edge_entry.getValue().isEmpty();
+            chunkAnalysis.getEdgesToEncode().filter(e -> e.getValue().addr_kind().index != exclude_link_kind.index).forEach(edge_entry -> {
+                final var is_must = edge_entry.getValue().conditions().isEmpty();
                 final var from = edge_entry.getKey().getLeft();
                 final var to = edge_entry.getKey().getRight();
                 may.add(from, to);
                 if (is_must) must.add(from, to);
 
                 if (is_must) {
-                    logger.info("MUST: {} -> {}", from, to);
+                    logger.info("{} MUST: {} -> {}", edge_entry.getValue().addr_kind(), from, to);
                 } else {
-                    logger.info("MAY-ONLY: {} -> {}", from, to);
+                    logger.info("{} MAY-ONLY: {} -> {}", edge_entry.getValue().addr_kind(), from, to);
                 }
             });
 

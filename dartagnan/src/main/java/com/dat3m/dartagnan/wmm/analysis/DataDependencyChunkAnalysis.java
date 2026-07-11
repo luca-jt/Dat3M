@@ -43,9 +43,34 @@ public class DataDependencyChunkAnalysis {
     private com.dat3m.dartagnan.program.Thread current_thread = null;
     private final Map<RegWriter, Integer> unvisited_reader_count;
 
-    record ConditionToBorder(PathCondition condition, Event border) {}
+    record ConditionToBorder(PathCondition condition, Event border, AddrLinkKind addr_kind) {}
 
-    record EdgeEncodingInfo(List<PathCondition> conditions, BitSet eliminated_bits) {} // this way we don't need exponentially many conditions stored and we can prematurely eliminate stuff
+    public record EdgeEncodingInfo(List<PathCondition> conditions, BitSet eliminated_bits, AddrLinkKind addr_kind) {} // this way we don't need exponentially many conditions stored and we can prematurely eliminate stuff
+
+    enum AddrLinkKind {
+        NONE(0x1), PURE(0x2), PART(0x3);
+        final int index;
+
+        AddrLinkKind(int index) {
+            this.index = index;
+        }
+
+        public AddrLinkKind merge(AddrLinkKind other) {
+            return switch (this.index | other.index) {
+                case 0x1 -> NONE;
+                case 0x2 -> PURE;
+                default  -> PART;   // 0x3
+            };
+        }
+
+        public AddrLinkKind add(AddrLinkKind other) {
+            return index > other.index ? this : other;
+        }
+
+        static AddrLinkKind fromUsageType(Register.UsageType type) {
+            return type == Register.UsageType.ADDR ? PURE : NONE;
+        }
+    }
 
     public DataDependencyChunkAnalysis(VerificationTask t, Context context) {
         task = checkNotNull(t);
@@ -99,25 +124,24 @@ public class DataDependencyChunkAnalysis {
             known_subpaths.clear();
             chunk_borders.clear();
             visited_sinks.clear();
-            final Map<Pair<RegReader, Register>, List<RegWriter>> writer_cache = new HashMap<>();
 
             for (RegReader possible_sink : reverse(sink_event_list)) {
                 if (!isChunkBorder(possible_sink)) continue;
                 if (visited_sinks.contains(possible_sink)) continue;
                 visited_sinks.add(possible_sink);
-                addDependencyEdge(possible_sink, possible_sink, PathCondition.from_size(event_count), writer_cache);
+                addDependencyEdge(possible_sink, possible_sink, PathCondition.from_size(event_count));
             }
         }
 
         logger.info("End of DataDependencyAnalysis");
     }
 
-    public Stream<Pair<Pair<Event, RegReader>, List<PathCondition>>> getEdgesToEncode() {
+    public Stream<Map.Entry<Pair<Event, RegReader>, EdgeEncodingInfo>> getEdgesToEncode() {
         if (!analysis_ran) {
             runAnalysis();
             analysis_ran = true;
         }
-        return edges_to_encode.entrySet().stream().map(p -> Pair.of(p.getKey(), p.getValue().conditions()));
+        return edges_to_encode.entrySet().stream();
     }
 
     private void addEvent(BitSet bits, Event event) {
@@ -136,17 +160,13 @@ public class DataDependencyChunkAnalysis {
                 if (event.hasTag(Tag.NO_CARRY_DEPS)) return false;
                 if (event.hasTag(Tag.MEMORY)) return true;
                 if (event instanceof CondJump) return true;
-                if (event instanceof RegWriter w) {
-                    final var result_reg = w.getResultRegister();
-                    for (RegReader reader : event.getFunction().getEvents(RegReader.class).stream()
-                            .filter(r -> r.getLocalId() > w.getLocalId())
-                            .filter(this::isChunkBorder)
-                            .toList()
-                    ) {
-                        final var fitting_read_is_present = reader.getRegisterReads().stream().anyMatch(read -> read.register() == result_reg && read.usageType() == Register.UsageType.ADDR);
-                        if (fitting_read_is_present) return true;
+                /*if (event instanceof RegWriter w) {
+                    for (RegReader reader : (((BackwardsReachingDefinitionsAnalysis) definitions).getReaders(w).getReaders())) {
+                        //if (!isChunkBorder(reader)) continue;
+                        final var addr_read_is_present = reader.getRegisterReads().stream().filter(r -> r.register() == w.getResultRegister()).anyMatch(read -> read.usageType() == Register.UsageType.ADDR);
+                        if (addr_read_is_present) return true;
                     }
-                }
+                }*/
                 return false;
             };
             final var value = value_computation.get();
@@ -157,12 +177,20 @@ public class DataDependencyChunkAnalysis {
         }
     }
 
-    private List<ConditionToBorder> addDependencyEdge(RegReader current_node, RegReader sink, PathCondition accumulated_condition, Map<Pair<RegReader, Register>, List<RegWriter>> writer_cache) {
+    private List<ConditionToBorder> addDependencyEdge(RegReader current_node, RegReader sink, PathCondition accumulated_condition) {
         final List<ConditionToBorder> paths_from_current = new ArrayList<>();
+
+        final var addr_link_map = new HashMap<Register, AddrLinkKind>();
+        if (current_node == sink) {
+            for (var read : current_node.getRegisterReads()) {
+                addr_link_map.merge(read.register(), AddrLinkKind.fromUsageType(read.usageType()), AddrLinkKind::merge);
+            }
+        }
 
         final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(current_node);
         for (Register register : writers.getUsedRegisters()) {
-            final var may_writers = writer_cache.computeIfAbsent(Pair.of(current_node, register), p -> writers.ofRegister(p.getRight()).getMayWriters());
+            final var may_writers = writers.ofRegister(register).getMayWriters();
+            final var addr_link_kind = addr_link_map.getOrDefault(register, AddrLinkKind.NONE);
 
             final BitSet overwrites = new BitSet(event_count);
 
@@ -181,7 +209,7 @@ public class DataDependencyChunkAnalysis {
                 final var is_chunk_border = isChunkBorder(possible_border);
 
                 if (is_chunk_border) {
-                    final var condition_to_border = new ConditionToBorder(new PathCondition(link_condition), possible_border);
+                    final var condition_to_border = new ConditionToBorder(new PathCondition(link_condition), possible_border, addr_link_kind);
                     paths_from_current.add(condition_to_border);
 
                     if (!visited_sinks.add(possible_border)) continue; // early return to prohibit multiple visits
@@ -191,7 +219,7 @@ public class DataDependencyChunkAnalysis {
                         accumulated_condition_for_next_call = PathCondition.from_size(event_count);
                     }
                 } else if (!is_conditionally_must) {
-                    if (possible_border instanceof RegReader && eventStreamOfSet(accumulated_condition.required(), current_thread).anyMatch(req -> req == possible_border)) { // TODO: this check fine?
+                    if (possible_border instanceof RegReader && eventStreamOfSet(accumulated_condition.required(), current_thread).anyMatch(req -> req == possible_border)) {
                         // essentially white/grey/black DFS to avoid loops like in the safe_stack example
                         accumulated_condition.forbidden().andNot(overwrites);
                         maybeReleaseKnownPaths(possible_border);
@@ -203,17 +231,16 @@ public class DataDependencyChunkAnalysis {
                     }
                 }
 
-                // TODO: try only stored links
                 // TODO: premature merge only better for worst case examples?
 
                 if (possible_border instanceof RegReader reader) {
                     if (is_chunk_border) {
-                        final var subpaths_from_reader = addDependencyEdge(reader, sink_for_next_call, accumulated_condition_for_next_call, writer_cache);
+                        final var subpaths_from_reader = addDependencyEdge(reader, sink_for_next_call, accumulated_condition_for_next_call);
                         assert subpaths_from_reader.isEmpty();
                     } else {
                         var subpaths_from_reader = known_subpaths.get(reader);
                         if (subpaths_from_reader == null) {
-                            subpaths_from_reader = addDependencyEdge(reader, sink_for_next_call, accumulated_condition_for_next_call, writer_cache);
+                            subpaths_from_reader = addDependencyEdge(reader, sink_for_next_call, accumulated_condition_for_next_call);
                             if (possible_border instanceof RegWriter border_writer && unvisited_reader_count.getOrDefault(border_writer, 0) > 1) {
                                 known_subpaths.put(reader, subpaths_from_reader);
                             }
@@ -221,7 +248,7 @@ public class DataDependencyChunkAnalysis {
 
                         maybeReleaseKnownPaths(possible_border);
 
-                        final List<ConditionToBorder> subpaths_to_add_to_current = updateConditionsToBorders(subpaths_from_reader, link_condition);
+                        final List<ConditionToBorder> subpaths_to_add_to_current = updateConditionsToBorders(subpaths_from_reader, link_condition, addr_link_kind);
                         paths_from_current.addAll(subpaths_to_add_to_current);
                     }
                 }
@@ -234,7 +261,8 @@ public class DataDependencyChunkAnalysis {
         if (current_node == sink) {
             for (var condition_to_border : paths_from_current) {
                 final var edge_key = Pair.of(condition_to_border.border, sink);
-                final var info = edges_to_encode.computeIfAbsent(edge_key, k -> new EdgeEncodingInfo(new ArrayList<>(2), new BitSet(event_count))); // most of the time there are only one or two paths
+                final var info = edges_to_encode.merge(edge_key, new EdgeEncodingInfo(new ArrayList<>(2), new BitSet(event_count), condition_to_border.addr_kind()), (i1, i2) -> new EdgeEncodingInfo(i1.conditions(), i1.eliminated_bits(), i1.addr_kind().merge(condition_to_border.addr_kind())));
+
                 if (!condition_to_border.condition.isStructAndCondMust()) {
                     info.conditions().add(condition_to_border.condition);
 
@@ -278,10 +306,10 @@ public class DataDependencyChunkAnalysis {
         }
     }
 
-    private static List<ConditionToBorder> updateConditionsToBorders(List<ConditionToBorder> subpaths_from_reader, PathCondition link_condition) {
+    private static List<ConditionToBorder> updateConditionsToBorders(List<ConditionToBorder> subpaths_from_reader, PathCondition link_condition, AddrLinkKind link_addr_kind) {
         final List<ConditionToBorder> subpaths_to_add_to_current = new ArrayList<>(subpaths_from_reader.size());
         for (var cond_to_border : subpaths_from_reader) {
-            final var cond_to_border_with_link = new ConditionToBorder(new PathCondition(cond_to_border.condition()), cond_to_border.border);
+            final var cond_to_border_with_link = new ConditionToBorder(new PathCondition(cond_to_border.condition()), cond_to_border.border, cond_to_border.addr_kind().add(link_addr_kind));
             cond_to_border_with_link.condition().merge(link_condition);
             subpaths_to_add_to_current.add(cond_to_border_with_link);
         }

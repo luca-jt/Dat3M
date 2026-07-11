@@ -514,6 +514,7 @@ public class ProgramEncoder {
 
         //final BooleanFormula data_value_formula = encodeDataValuesAssign();
         final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
+        //final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhiNoReuse();
 
         if (dependencies_are_relevant) {
             final BooleanFormula dependency_formula = encodeDataDependencies();
@@ -659,17 +660,68 @@ public class ProgramEncoder {
         return bmgr.and(enc);
     }
 
+    public BooleanFormula encodeDataValuesOnlyRightExpressionWithPhiNoReuse() {
+        logger.info("Encoding data values.");
+
+        final ExpressionFactory exprs = ExpressionFactory.getInstance();
+        List<BooleanFormula> enc = new ArrayList<>();
+        HashMap<RegisterReadSignature, TypedFormula<?, ?>> reader_signature_formulas = new HashMap<>();
+
+        for (RegReader reader : context.getTask().getProgram().getThreadEvents(RegReader.class)) {
+            final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(reader);
+            for (Register register : writers.getUsedRegisters()) {
+                final ReachingDefinitionsAnalysis.RegisterWriters reg = writers.ofRegister(register);
+                final var may_writers = reg.getMayWriters();
+
+                final RegisterReadSignature signature = new RegisterReadSignature(
+                        may_writers.stream().map(Event::getGlobalId).toList() // must writer check unneeded, register is implied
+                );
+
+                final var reader_phi = reader_signature_formulas.computeIfAbsent(signature, sig -> {
+                    if (may_writers.isEmpty()) {
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), exprs.makeGeneralZero(register.getType())));
+                        }
+                        return null;
+                    }
+
+                    final var phi_var = exprEnc.makeVariable("phi_" + reader_signature_formulas.size(), register.getType());
+
+                    final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
+                    Expression ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
+                    if (initializeRegisters && !reg.mustBeInitialized()) {
+                        ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, exprs.makeGeneralZero(register.getType()));
+                    }
+
+                    for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
+                        final var case_encoding = exprEnc.encodeAt(context.result(writer), writer);
+                        ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
+                    }
+
+                    enc.add(exprEnc.assignEqual(phi_var, ite));
+                    return phi_var;
+                });
+
+                if (reader_phi != null) {
+                    enc.add(exprEnc.assignEqual(exprEnc.encodeAt(register, reader), reader_phi));
+                }
+            }
+        }
+
+        return bmgr.and(enc);
+    }
+
     public BooleanFormula encodeDataDependencies() {
         logger.info("Encoding data dependencies.");
 
         List<BooleanFormula> enc = new ArrayList<>();
 
-        chunkAnalysis.getEdgesToEncode().filter(e -> !e.getValue().isEmpty()).forEach(edge_entry -> {
+        chunkAnalysis.getEdgesToEncode().filter(e -> !e.getValue().conditions().isEmpty()).forEach(edge_entry -> {
             final var from = edge_entry.getKey().getLeft();
             final var to = edge_entry.getKey().getRight();
 
             final List<BooleanFormula> path_encodings = new ArrayList<>();
-            for (var path_condition : edge_entry.getValue()) {
+            for (var path_condition : edge_entry.getValue().conditions()) {
                 final List<BooleanFormula> path_cond_formulas = new ArrayList<>(chunkAnalysis.eventStreamOfSet(path_condition.required(), from.getThread()).map(context::execution).toList());
                 final List<BooleanFormula> forbidden = chunkAnalysis.eventStreamOfSet(path_condition.forbidden(), from.getThread()).map(context::execution).toList();
                 path_cond_formulas.add(bmgr.not(bmgr.or(forbidden)));
