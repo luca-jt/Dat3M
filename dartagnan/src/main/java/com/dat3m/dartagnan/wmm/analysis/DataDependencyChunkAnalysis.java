@@ -100,7 +100,7 @@ public class DataDependencyChunkAnalysis {
         }
 
         task.getProgram().getThreadEvents().stream().map(e -> {
-            if (e instanceof ExecutionStatus status && status.doesTrackDep()) return status.getStatusEvent(); // only writers and status events can be in the sets
+            //if (e instanceof ExecutionStatus status && status.doesTrackDep()) return status.getStatusEvent(); // only writers and status events can be in the sets
             if (e instanceof RegWriter) return e;
             return null;
         }).filter(Objects::nonNull).forEach(event -> thread_condition_events.get(event.getThread()).add(event));
@@ -157,17 +157,8 @@ public class DataDependencyChunkAnalysis {
         final var is_chunk_border_value = chunk_borders.get(event);
         if (is_chunk_border_value == null) {
             final Supplier<Boolean> value_computation = () -> {
-                if (event.hasTag(Tag.NO_CARRY_DEPS)) return false;
                 if (event.hasTag(Tag.MEMORY)) return true;
-                if (event instanceof CondJump) return true;
-                /*if (event instanceof RegWriter w) {
-                    for (RegReader reader : (((BackwardsReachingDefinitionsAnalysis) definitions).getReaders(w).getReaders())) {
-                        //if (!isChunkBorder(reader)) continue;
-                        final var addr_read_is_present = reader.getRegisterReads().stream().filter(r -> r.register() == w.getResultRegister()).anyMatch(read -> read.usageType() == Register.UsageType.ADDR);
-                        if (addr_read_is_present) return true;
-                    }
-                }*/
-                return false;
+                return event instanceof CondJump jump && !(jump.isGoto() || jump.isDead());
             };
             final var value = value_computation.get();
             chunk_borders.put(event, value);
@@ -202,7 +193,7 @@ public class DataDependencyChunkAnalysis {
                 accumulated_condition.forbidden().or(overwrites);
 
                 final Event possible_border = (writer instanceof ExecutionStatus status && status.doesTrackDep()) ? status.getStatusEvent() : writer; // status events are always writers tagged with MEMORY and are chunk borders
-                final var is_conditionally_must = exec.isImplied(current_node, possible_border);
+                final var is_conditionally_must = exec.isImplied(current_node, writer);
 
                 var sink_for_next_call = sink;
                 var accumulated_condition_for_next_call = accumulated_condition;
@@ -212,23 +203,19 @@ public class DataDependencyChunkAnalysis {
                     final var condition_to_border = new ConditionToBorder(new PathCondition(link_condition), possible_border, addr_link_kind);
                     paths_from_current.add(condition_to_border);
 
-                    if (!visited_sinks.add(possible_border)) continue; // early return to prohibit multiple visits
+                    if (!visited_sinks.add(possible_border)) {
+                        accumulated_condition.forbidden().andNot(overwrites);
+                        addEvent(overwrites, writer);
+                        continue; // early return to prohibit multiple visits
+                    }
 
                     if (possible_border instanceof RegReader reader) {
                         sink_for_next_call = reader;
                         accumulated_condition_for_next_call = PathCondition.from_size(event_count);
                     }
                 } else if (!is_conditionally_must) {
-                    if (possible_border instanceof RegReader && eventStreamOfSet(accumulated_condition.required(), current_thread).anyMatch(req -> req == possible_border)) {
-                        // essentially white/grey/black DFS to avoid loops like in the safe_stack example
-                        accumulated_condition.forbidden().andNot(overwrites);
-                        maybeReleaseKnownPaths(possible_border);
-                        addEvent(overwrites, possible_border);
-                        continue;
-                    } else {
-                        addEvent(link_condition.required(), possible_border);
-                        accumulated_condition.required().or(link_condition.required());
-                    }
+                    addEvent(link_condition.required(), writer);
+                    accumulated_condition.required().or(link_condition.required());
                 }
 
                 // TODO: premature merge only better for worst case examples?
@@ -246,7 +233,7 @@ public class DataDependencyChunkAnalysis {
                             }
                         }
 
-                        maybeReleaseKnownPaths(possible_border);
+                        maybeReleaseKnownPaths(writer);
 
                         final List<ConditionToBorder> subpaths_to_add_to_current = updateConditionsToBorders(subpaths_from_reader, link_condition, addr_link_kind);
                         paths_from_current.addAll(subpaths_to_add_to_current);
@@ -254,7 +241,7 @@ public class DataDependencyChunkAnalysis {
                 }
 
                 accumulated_condition.remove(link_condition);
-                addEvent(overwrites, possible_border);
+                addEvent(overwrites, writer);
             }
         }
 

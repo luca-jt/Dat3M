@@ -190,24 +190,25 @@ public class Wmm {
             case CASDEP -> new CASDependency(r);
             case SI -> new SameInstruction(r);
             case CRIT -> new LinuxCriticalSections(r);
-            case IDD, IDDTRANS -> new DirectDataDependency(r);
+            case IDD -> new DirectDataDependency(r);
+            case IDDTRANS -> new TransitiveClosure(r, getOrCreatePredefinedRelation(IDD));
             case ADDRDIRECT -> new DirectAddressDependency(r);
             case CTRLDIRECT -> new DirectControlDependency(r);
             case EMPTY -> new Empty(r);
             case DATA -> {
                 final Relation memory = getOrCreatePredefinedRelation(MEMORY);
-                yield new Intersection(r, getOrCreatePredefinedRelation(IDDTRANS), product(memory, memory));
+                yield new Intersection(r, getOrCreatePredefinedRelation(IDD), product(memory, memory));
             }
             case ADDR -> {
                 final Relation memory = getOrCreatePredefinedRelation(MEMORY);
-                final Relation idd = getOrCreatePredefinedRelation(IDDTRANS);
+                //final Relation idd = getOrCreatePredefinedRelation(IDDTRANS);
                 final Relation addr = getOrCreatePredefinedRelation(ADDRDIRECT);
-                yield new Intersection(r, union(addr, composition(idd, addr)), product(memory, memory));
+                yield new Intersection(r, addr, product(memory, memory));
             }
             case CTRL -> {
                 final Relation memory = getOrCreatePredefinedRelation(MEMORY);
                 final Relation visible = getOrCreatePredefinedRelation(VISIBLE);
-                final Relation idd = getOrCreatePredefinedRelation(IDDTRANS);
+                final Relation idd = getOrCreatePredefinedRelation(IDD);
                 final Relation ctrl = getOrCreatePredefinedRelation(CTRLDIRECT);
                 yield new Intersection(r, composition(idd, ctrl), product(memory, visible));
             }
