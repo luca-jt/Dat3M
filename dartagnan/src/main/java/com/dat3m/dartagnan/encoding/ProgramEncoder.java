@@ -633,9 +633,14 @@ public class ProgramEncoder {
                             ite = exprs.makeITE(exprEnc.wrap(context.execution(additional_writer)), case_encoding, ite);
                         }
                     } else {
-                        ite = initializeRegisters && !reg.mustBeInitialized() ? exprs.makeGeneralZero(register.getType()) : exprEnc.makeVariable("ITE_undef_" + reader_signature_formulas.size(), register.getType());
+                        final var last_writer_in_reverse_order = may_writers.get(0); // we put the existing formula in the else block, so no reverse order iteration
 
-                        for (RegWriter writer : may_writers) { // we put the existing formula in the else block, so no reverse order iteration
+                        ite = exprEnc.encodeAt(context.result(last_writer_in_reverse_order), last_writer_in_reverse_order);
+                        if (initializeRegisters && !reg.mustBeInitialized()) {
+                            ite = exprs.makeITE(exprEnc.wrap(context.execution(last_writer_in_reverse_order)), ite, exprs.makeGeneralZero(register.getType()));
+                        }
+
+                        for (RegWriter writer : may_writers.subList(1, may_writers.size())) {
                             final var case_encoding = exprEnc.encodeAt(context.result(writer), writer);
                             ite = exprs.makeITE(exprEnc.wrap(context.execution(writer)), case_encoding, ite);
                         }
@@ -710,6 +715,8 @@ public class ProgramEncoder {
         logger.info("Encoding data dependencies.");
 
         List<BooleanFormula> enc = new ArrayList<>();
+
+        /// Für jede Edge, die eine Condition besitzt (nicht must ist), wird eine dependency variable eingeführt, und die PathCondition bits in execution conditions umgewandelt für jede Condition.
 
         chunkAnalysis.getEdgesToEncode().filter(e -> !e.getValue().conditions().isEmpty()).forEach(edge_entry -> {
             final var from = edge_entry.getKey().getLeft();

@@ -18,7 +18,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
-import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -33,21 +32,16 @@ public class DataDependencyChunkAnalysis {
     protected final ExecutionAnalysis exec;
     protected final ReachingDefinitionsAnalysis definitions;
 
-    private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode; // edges are (if so) writer -> reader
-    private final Map<Event, Boolean> chunk_borders;
+    private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode; /// Das sind die Edges mit ihren Conditions, die am Ende encoded werden und die may und must sets von idd und addrdirect füllen
     private final Set<Event> visited_sinks;
     private int event_count = -1;
-    private final Map<com.dat3m.dartagnan.program.Thread, BiMap<Event, Integer>> event_bit_indices;
+    private final Map<com.dat3m.dartagnan.program.Thread, BiMap<Event, Integer>> event_bit_indices; /// Mapping für Events zu bits in den Path Conditions
     private boolean analysis_ran = false;
-    private final Map<RegReader, List<ConditionToBorder>> known_subpaths;
     private com.dat3m.dartagnan.program.Thread current_thread = null;
-    private final Map<RegWriter, Integer> unvisited_reader_count;
 
-    record ConditionToBorder(PathCondition condition, Event border, AddrLinkKind addr_kind) {}
+    public record EdgeEncodingInfo(List<PathCondition> conditions, BitSet eliminated_bits, AddrLinkKind addr_kind) {} /// Eliminated bits werden nicht verwendet im Moment, PathCondition ist in einer separaten Datei.
 
-    public record EdgeEncodingInfo(List<PathCondition> conditions, BitSet eliminated_bits, AddrLinkKind addr_kind) {} // this way we don't need exponentially many conditions stored and we can prematurely eliminate stuff
-
-    enum AddrLinkKind {
+    enum AddrLinkKind { /// Trackt welche edges mit einem Address read starten und Teil von addrdirect sein müssen
         NONE(0x1), PURE(0x2), PART(0x3);
         final int index;
 
@@ -79,11 +73,8 @@ public class DataDependencyChunkAnalysis {
         definitions = context.requires(ReachingDefinitionsAnalysis.class);
 
         edges_to_encode = new LinkedHashMap<>();
-        chunk_borders = new HashMap<>();
         visited_sinks = new HashSet<>();
         event_bit_indices = new HashMap<>();
-        known_subpaths = new HashMap<>();
-        unvisited_reader_count = new HashMap<>();
     }
 
     private void runAnalysis() {
@@ -99,20 +90,17 @@ public class DataDependencyChunkAnalysis {
             thread_sink_events.put(thread, new ArrayList<>());
         }
 
-        task.getProgram().getThreadEvents().stream().map(e -> {
-            //if (e instanceof ExecutionStatus status && status.doesTrackDep()) return status.getStatusEvent(); // only writers and status events can be in the sets
-            if (e instanceof RegWriter) return e;
-            return null;
-        }).filter(Objects::nonNull).forEach(event -> thread_condition_events.get(event.getThread()).add(event));
+        task.getProgram().getThreadEvents().stream().flatMap(e -> {
+            if (e instanceof ExecutionStatus status && status.doesTrackDep()) return Stream.of(e, status.getStatusEvent()); // only writers and status events can be in the sets
+            if (e instanceof RegWriter) return Stream.of(e);
+            return Stream.empty();
+        }).forEach(event -> thread_condition_events.get(event.getThread()).add(event));
 
         for (var event : task.getProgram().getThreadEvents(RegReader.class)) { // only readers can be sinks
             thread_sink_events.get(event.getThread()).add(event);
-
-            final var writers = definitions.getWriters(event);
-            writers.getUsedRegisters().stream().flatMap(r -> writers.ofRegister(r).getMayWriters().stream()).forEach(writer -> unvisited_reader_count.merge(writer, 1, Integer::sum));
         }
 
-        for (var entry : thread_sink_events.entrySet()) {
+        for (var entry : thread_sink_events.entrySet()) { /// Die Analyse wird für jeden Thread einzeln durchgeführt.
             current_thread = entry.getKey();
             final var sink_event_list = entry.getValue();
             final var all_condition_events = thread_condition_events.get(current_thread);
@@ -121,17 +109,22 @@ public class DataDependencyChunkAnalysis {
             for (int i = 0; i < all_condition_events.size(); i++) {
                 bit_index_map.put(all_condition_events.get(i), i);
             }
-            known_subpaths.clear();
-            chunk_borders.clear();
             visited_sinks.clear();
 
             for (RegReader possible_sink : reverse(sink_event_list)) {
                 if (!isChunkBorder(possible_sink)) continue;
-                if (visited_sinks.contains(possible_sink)) continue;
-                visited_sinks.add(possible_sink);
-                addDependencyEdge(possible_sink, possible_sink, PathCondition.from_size(event_count));
+                if (!visited_sinks.add(possible_sink)) continue;
+                addDependencyEdge(possible_sink, possible_sink, PathCondition.from_size(event_count), AddrLinkKind.NONE);
             }
         }
+
+        edges_to_encode.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty()).forEach(e -> {
+            final var info = e.getValue();
+
+            if (info.conditions().stream().anyMatch(PathCondition::isStructAndCondMust)) { /// Wenn eine Must Condition für eine Edge existiert, sind andere Conditions irrelevant.
+                info.conditions().clear();
+            }
+        });
 
         logger.info("End of DataDependencyAnalysis");
     }
@@ -149,157 +142,86 @@ public class DataDependencyChunkAnalysis {
         bits.set(index);
     }
 
+    private void removeEvent(BitSet bits, Event event) {
+        final var index = event_bit_indices.get(current_thread).get(event);
+        bits.set(index, false);
+    }
+
     public Stream<Event> eventStreamOfSet(BitSet set, com.dat3m.dartagnan.program.Thread thread) {
         return set.stream().mapToObj(i -> event_bit_indices.get(thread).inverse().get(i));
     }
 
-    private boolean isChunkBorder(Event event) {
-        final var is_chunk_border_value = chunk_borders.get(event);
-        if (is_chunk_border_value == null) {
-            final Supplier<Boolean> value_computation = () -> {
-                if (event.hasTag(Tag.MEMORY)) return true;
-                return event instanceof CondJump jump && !(jump.isGoto() || jump.isDead());
-            };
-            final var value = value_computation.get();
-            chunk_borders.put(event, value);
-            return value;
-        } else {
-            return is_chunk_border_value;
-        }
+    private boolean isChunkBorder(Event event) { /// Markiert edge Entpunkte.
+        if (event.hasTag(Tag.MEMORY)) return true;
+        return event instanceof CondJump jump && !(jump.isGoto() || jump.isDead());
     }
 
-    private List<ConditionToBorder> addDependencyEdge(RegReader current_node, RegReader sink, PathCondition accumulated_condition) {
-        final List<ConditionToBorder> paths_from_current = new ArrayList<>();
+    private void addDependencyEdge(RegReader current_node, RegReader sink, PathCondition accumulated_condition, AddrLinkKind path_link_kind) {
+        /// Preorder DFS in reverse program order, wo Paths zu chunk borders gesucht werden und die required und forbidden executions für diese Edge getrackt werden.
+        /// Die execution conditions der Edge Endpunkte werden separat in Encoding eingefügt, die PathConditions tracken nur die der möglichen Nodes auf dem Pfaden zwischen den Borders.
+        /// Conditions der einzelnen Links auf einem transitiven Pfad zwischen Chunk borders werden zusammengefasst.
+        /// Im Moment wird einfach stur jede Node, die collapsed wird, als required getrackt. Das war auch mal anders (aber siehe Kommentar weiter unten).
 
         final var addr_link_map = new HashMap<Register, AddrLinkKind>();
         if (current_node == sink) {
             for (var read : current_node.getRegisterReads()) {
-                addr_link_map.merge(read.register(), AddrLinkKind.fromUsageType(read.usageType()), AddrLinkKind::merge);
+                addr_link_map.merge(read.register(), AddrLinkKind.fromUsageType(read.usageType()), AddrLinkKind::merge); /// Register Mapping für die Read types um addr reads zu finden.
             }
         }
+
+        final var forbidden_up_unitil_here = (BitSet) accumulated_condition.forbidden().clone(); /// Wird verwendet um die overwrites von einem Register zu resetten.
 
         final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(current_node);
         for (Register register : writers.getUsedRegisters()) {
             final var may_writers = writers.ofRegister(register).getMayWriters();
             final var addr_link_kind = addr_link_map.getOrDefault(register, AddrLinkKind.NONE);
 
-            final BitSet overwrites = new BitSet(event_count);
-
-            for (int writer_index = may_writers.size() - 1; writer_index >= 0; writer_index--) {
+            for (int writer_index = may_writers.size() - 1; writer_index >= 0; writer_index--) { /// Reverse program order
                 final var writer = may_writers.get(writer_index);
-                final PathCondition link_condition = PathCondition.from_size(event_count);
 
-                link_condition.forbidden().or(overwrites);
-                accumulated_condition.forbidden().or(overwrites);
+                Event possible_border = writer; // status events are always writers tagged with MEMORY and are chunk borders
+                if (writer instanceof ExecutionStatus status && status.doesTrackDep()) { /// Executions status link handling.
+                    possible_border = status.getStatusEvent();
+                    addEvent(accumulated_condition.required(), writer);
+                    assert isChunkBorder(possible_border); // TODO: temp
+                }
 
-                final Event possible_border = (writer instanceof ExecutionStatus status && status.doesTrackDep()) ? status.getStatusEvent() : writer; // status events are always writers tagged with MEMORY and are chunk borders
-                final var is_conditionally_must = exec.isImplied(current_node, writer);
+                /// Ich habe erst nur die Events als required auf einem Pfad markiert, die nicht implied sind.
+                /// Das habe ich dann temporär geändert (wodurch dann auch der ExecutionStatus case ausführlicher sein muss), aber das wäre ja auch nur ein strengthening der Conditions.
+                final var is_conditionally_must = exec.isImplied(current_node, writer) && false;
 
-                var sink_for_next_call = sink;
-                var accumulated_condition_for_next_call = accumulated_condition;
                 final var is_chunk_border = isChunkBorder(possible_border);
 
                 if (is_chunk_border) {
-                    final var condition_to_border = new ConditionToBorder(new PathCondition(link_condition), possible_border, addr_link_kind);
-                    paths_from_current.add(condition_to_border);
+                    final var info = edges_to_encode.merge(
+                            Pair.of(possible_border, sink),
+                            new EdgeEncodingInfo(new ArrayList<>(), new BitSet(event_count), path_link_kind.add(addr_link_kind)),
+                            (i1, i2) -> new EdgeEncodingInfo(i1.conditions(), i1.eliminated_bits(), i1.addr_kind().merge(i2.addr_kind()))
+                    );
+                    info.conditions().add(new PathCondition(accumulated_condition)); /// Edge wird recorded mit einer Kopie der akkumulierten Condition auf dem aktuellen Path.
 
-                    if (!visited_sinks.add(possible_border)) {
-                        accumulated_condition.forbidden().andNot(overwrites);
-                        addEvent(overwrites, writer);
-                        continue; // early return to prohibit multiple visits
+                    addEvent(accumulated_condition.forbidden(), writer);
+                    if (writer instanceof ExecutionStatus status && status.doesTrackDep()) {
+                        removeEvent(accumulated_condition.required(), writer);
+                        addEvent(accumulated_condition.forbidden(), status.getStatusEvent());
                     }
-
-                    if (possible_border instanceof RegReader reader) {
-                        sink_for_next_call = reader;
-                        accumulated_condition_for_next_call = PathCondition.from_size(event_count);
-                    }
+                    /// Hier wird aktuell sowohl status event, als auch execution status zu forbidden hinzugefügt.
+                    /// Das hatte ich auch weggelassen (siehe Kommentar zu ExecutionCondition weiter oben), aber das hatte nichts geändert.
+                    continue;
                 } else if (!is_conditionally_must) {
-                    addEvent(link_condition.required(), writer);
-                    accumulated_condition.required().or(link_condition.required());
+                    addEvent(accumulated_condition.required(), writer);
                 }
-
-                // TODO: premature merge only better for worst case examples?
 
                 if (possible_border instanceof RegReader reader) {
-                    if (is_chunk_border) {
-                        final var subpaths_from_reader = addDependencyEdge(reader, sink_for_next_call, accumulated_condition_for_next_call);
-                        assert subpaths_from_reader.isEmpty();
-                    } else {
-                        var subpaths_from_reader = known_subpaths.get(reader);
-                        if (subpaths_from_reader == null) {
-                            subpaths_from_reader = addDependencyEdge(reader, sink_for_next_call, accumulated_condition_for_next_call);
-                            if (possible_border instanceof RegWriter border_writer && unvisited_reader_count.getOrDefault(border_writer, 0) > 1) {
-                                known_subpaths.put(reader, subpaths_from_reader);
-                            }
-                        }
-
-                        maybeReleaseKnownPaths(writer);
-
-                        final List<ConditionToBorder> subpaths_to_add_to_current = updateConditionsToBorders(subpaths_from_reader, link_condition, addr_link_kind);
-                        paths_from_current.addAll(subpaths_to_add_to_current);
-                    }
+                    addDependencyEdge(reader, sink, accumulated_condition, path_link_kind.add(addr_link_kind));
                 }
 
-                accumulated_condition.remove(link_condition);
-                addEvent(overwrites, writer);
+                addEvent(accumulated_condition.forbidden(), writer);
+                // status events are chunk borders, so these updates are sufficient
+                if (!is_conditionally_must) removeEvent(accumulated_condition.required(), writer);
             }
+
+            accumulated_condition.forbidden().and(forbidden_up_unitil_here);
         }
-
-        if (current_node == sink) {
-            for (var condition_to_border : paths_from_current) {
-                final var edge_key = Pair.of(condition_to_border.border, sink);
-                final var info = edges_to_encode.merge(edge_key, new EdgeEncodingInfo(new ArrayList<>(2), new BitSet(event_count), condition_to_border.addr_kind()), (i1, i2) -> new EdgeEncodingInfo(i1.conditions(), i1.eliminated_bits(), i1.addr_kind().merge(condition_to_border.addr_kind())));
-
-                if (!condition_to_border.condition.isStructAndCondMust()) {
-                    info.conditions().add(condition_to_border.condition);
-
-                    // prematurely eliminate stuff and remove tautologies
-                    final BitSet intersection = new BitSet(event_count);
-                    info.conditions().stream().map(PathCondition::required).forEach(intersection::or);
-
-                    final BitSet all_forbidden = new BitSet(event_count);
-                    info.conditions().stream().map(PathCondition::forbidden).forEach(all_forbidden::or);
-
-                    intersection.and(all_forbidden);
-                    info.eliminated_bits().or(intersection);
-
-                    info.conditions().removeIf(existing_condition -> {
-                        existing_condition.required().andNot(info.eliminated_bits());
-                        existing_condition.forbidden().andNot(info.eliminated_bits());
-                        return existing_condition.isStructAndCondMust();
-                    });
-
-                    if (!info.conditions().isEmpty()) {
-                        final var unique = new HashSet<>(info.conditions());
-                        info.conditions().clear();
-                        info.conditions().addAll(unique);
-                    }
-                } else {
-                    info.conditions().clear();
-                }
-            }
-            return List.of();
-        }
-
-        if (paths_from_current.isEmpty()) return List.of();
-
-        return paths_from_current;
-    }
-
-    private void maybeReleaseKnownPaths(Event possible_border) {
-        if (possible_border instanceof RegWriter border_writer && possible_border instanceof RegReader reader) {
-            final var new_value = unvisited_reader_count.computeIfPresent(border_writer, (w, i) -> i > 1 ? i - 1 : null);
-            if (new_value == null) known_subpaths.remove(reader);
-        }
-    }
-
-    private static List<ConditionToBorder> updateConditionsToBorders(List<ConditionToBorder> subpaths_from_reader, PathCondition link_condition, AddrLinkKind link_addr_kind) {
-        final List<ConditionToBorder> subpaths_to_add_to_current = new ArrayList<>(subpaths_from_reader.size());
-        for (var cond_to_border : subpaths_from_reader) {
-            final var cond_to_border_with_link = new ConditionToBorder(new PathCondition(cond_to_border.condition()), cond_to_border.border, cond_to_border.addr_kind().add(link_addr_kind));
-            cond_to_border_with_link.condition().merge(link_condition);
-            subpaths_to_add_to_current.add(cond_to_border_with_link);
-        }
-        return subpaths_to_add_to_current;
     }
 }
