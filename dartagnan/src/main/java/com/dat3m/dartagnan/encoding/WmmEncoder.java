@@ -13,6 +13,7 @@ import com.dat3m.dartagnan.program.memory.FinalMemoryValue;
 import com.dat3m.dartagnan.smt.EncodingUtils;
 import com.dat3m.dartagnan.smt.FormulaManagerExt;
 import com.dat3m.dartagnan.wmm.*;
+import com.dat3m.dartagnan.wmm.analysis.DataDependencyChunkAnalysis;
 import com.dat3m.dartagnan.wmm.analysis.RelationAnalysis;
 import com.dat3m.dartagnan.wmm.axiom.Acyclicity;
 import com.dat3m.dartagnan.wmm.axiom.Axiom;
@@ -564,11 +565,14 @@ public class WmmEncoder {
         }
 
         private Void visitDirectDependency(Definition dep) {
-            final ReachingDefinitionsAnalysis definitions = context.getAnalysisContext()
-                    .get(ReachingDefinitionsAnalysis.class);
+            final var chunkAnalysis = context.getAnalysisContext().get(DataDependencyChunkAnalysis.class);
             final EncodingContext.EdgeEncoder edge = context.edge(dep.getDefinedRelation());
             getActiveSet(dep).apply((writer, reader) -> {
-                if (!(writer instanceof RegWriter wr) || !(reader instanceof RegReader rr)) {
+                if (!(reader instanceof RegReader rr && chunkAnalysis.edgeExists(writer, rr))) {
+                    enc.add(bmgr.not(edge.encode(writer, reader)));
+                }
+                /// this would catch StatusEvent->ExecutionStatus edges in the former encoding (thomas comment on what edges come here)
+                /*if (!(writer instanceof RegWriter wr) || !(reader instanceof RegReader rr)) {
                     enc.add(bmgr.not(edge.encode(writer, reader)));
                 } else {
                     final ReachingDefinitionsAnalysis.RegisterWriters state = definitions.getWriters(rr)
@@ -576,9 +580,9 @@ public class WmmEncoder {
                     if (state.getMustWriters().contains(writer)) {
                         enc.add(bmgr.equivalence(edge.encode(writer, reader), context.execution(writer, reader)));
                     } else if (!state.getMayWriters().contains(writer)) {
-                        enc.add(bmgr.not(edge.encode(writer, reader)));
+                        //enc.add(bmgr.not(edge.encode(writer, reader)));
                     }
-                }
+                }*/
             });
             return null;
         }

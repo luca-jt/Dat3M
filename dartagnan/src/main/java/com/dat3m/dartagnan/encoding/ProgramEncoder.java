@@ -716,8 +716,6 @@ public class ProgramEncoder {
 
         List<BooleanFormula> enc = new ArrayList<>();
 
-        /// Für jede Edge, die eine Condition besitzt (nicht must ist), wird eine dependency variable eingeführt, und die PathCondition bits in execution conditions umgewandelt für jede Condition.
-
         chunkAnalysis.getEdgesToEncode().filter(e -> !e.getValue().conditions().isEmpty()).forEach(edge_entry -> {
             final var from = edge_entry.getKey().getLeft();
             final var to = edge_entry.getKey().getRight();

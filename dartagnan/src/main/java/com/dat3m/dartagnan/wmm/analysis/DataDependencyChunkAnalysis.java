@@ -32,16 +32,16 @@ public class DataDependencyChunkAnalysis {
     protected final ExecutionAnalysis exec;
     protected final ReachingDefinitionsAnalysis definitions;
 
-    private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode; /// Das sind die Edges mit ihren Conditions, die am Ende encoded werden und die may und must sets von idd und addrdirect füllen
+    private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode;
     private final Set<Event> visited_sinks;
     private int event_count = -1;
-    private final Map<com.dat3m.dartagnan.program.Thread, BiMap<Event, Integer>> event_bit_indices; /// Mapping für Events zu bits in den Path Conditions
+    private final Map<com.dat3m.dartagnan.program.Thread, BiMap<Event, Integer>> event_bit_indices;
     private boolean analysis_ran = false;
     private com.dat3m.dartagnan.program.Thread current_thread = null;
 
-    public record EdgeEncodingInfo(List<PathCondition> conditions, BitSet eliminated_bits, AddrLinkKind addr_kind) {} /// Eliminated bits werden nicht verwendet im Moment, PathCondition ist in einer separaten Datei.
+    public record EdgeEncodingInfo(List<PathCondition> conditions, AddrLinkKind addr_kind) {}
 
-    enum AddrLinkKind { /// Trackt welche edges mit einem Address read starten und Teil von addrdirect sein müssen
+    enum AddrLinkKind {
         NONE(0x1), PURE(0x2), PART(0x3);
         final int index;
 
@@ -90,17 +90,13 @@ public class DataDependencyChunkAnalysis {
             thread_sink_events.put(thread, new ArrayList<>());
         }
 
-        task.getProgram().getThreadEvents().stream().flatMap(e -> {
-            if (e instanceof ExecutionStatus status && status.doesTrackDep()) return Stream.of(e, status.getStatusEvent()); // only writers and status events can be in the sets
-            if (e instanceof RegWriter) return Stream.of(e);
-            return Stream.empty();
-        }).forEach(event -> thread_condition_events.get(event.getThread()).add(event));
+        task.getProgram().getThreadEvents().stream().filter(e -> e instanceof RegWriter).forEach(event -> thread_condition_events.get(event.getThread()).add(event));
 
         for (var event : task.getProgram().getThreadEvents(RegReader.class)) { // only readers can be sinks
             thread_sink_events.get(event.getThread()).add(event);
         }
 
-        for (var entry : thread_sink_events.entrySet()) { /// Die Analyse wird für jeden Thread einzeln durchgeführt.
+        for (var entry : thread_sink_events.entrySet()) {
             current_thread = entry.getKey();
             final var sink_event_list = entry.getValue();
             final var all_condition_events = thread_condition_events.get(current_thread);
@@ -121,7 +117,7 @@ public class DataDependencyChunkAnalysis {
         edges_to_encode.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty()).forEach(e -> {
             final var info = e.getValue();
 
-            if (info.conditions().stream().anyMatch(PathCondition::isStructAndCondMust)) { /// Wenn eine Must Condition für eine Edge existiert, sind andere Conditions irrelevant.
+            if (info.conditions().stream().anyMatch(PathCondition::isStructAndCondMust)) {
                 info.conditions().clear();
             }
         });
@@ -135,6 +131,10 @@ public class DataDependencyChunkAnalysis {
             analysis_ran = true;
         }
         return edges_to_encode.entrySet().stream();
+    }
+
+    public boolean edgeExists(Event e1, RegReader e2) {
+        return edges_to_encode.containsKey(Pair.of(e1, e2));
     }
 
     private void addEvent(BitSet bits, Event event) {
@@ -151,62 +151,46 @@ public class DataDependencyChunkAnalysis {
         return set.stream().mapToObj(i -> event_bit_indices.get(thread).inverse().get(i));
     }
 
-    private boolean isChunkBorder(Event event) { /// Markiert edge Entpunkte.
+    private boolean isChunkBorder(Event event) {
         if (event.hasTag(Tag.MEMORY)) return true;
         return event instanceof CondJump jump && !(jump.isGoto() || jump.isDead());
     }
 
     private void addDependencyEdge(RegReader current_node, RegReader sink, PathCondition accumulated_condition, AddrLinkKind path_link_kind) {
-        /// Preorder DFS in reverse program order, wo Paths zu chunk borders gesucht werden und die required und forbidden executions für diese Edge getrackt werden.
-        /// Die execution conditions der Edge Endpunkte werden separat in Encoding eingefügt, die PathConditions tracken nur die der möglichen Nodes auf dem Pfaden zwischen den Borders.
-        /// Conditions der einzelnen Links auf einem transitiven Pfad zwischen Chunk borders werden zusammengefasst.
-        /// Im Moment wird einfach stur jede Node, die collapsed wird, als required getrackt. Das war auch mal anders (aber siehe Kommentar weiter unten).
-
         final var addr_link_map = new HashMap<Register, AddrLinkKind>();
         if (current_node == sink) {
             for (var read : current_node.getRegisterReads()) {
-                addr_link_map.merge(read.register(), AddrLinkKind.fromUsageType(read.usageType()), AddrLinkKind::merge); /// Register Mapping für die Read types um addr reads zu finden.
+                addr_link_map.merge(read.register(), AddrLinkKind.fromUsageType(read.usageType()), AddrLinkKind::merge);
             }
         }
 
-        final var forbidden_up_unitil_here = (BitSet) accumulated_condition.forbidden().clone(); /// Wird verwendet um die overwrites von einem Register zu resetten.
+        final var forbidden_up_unitil_here = (BitSet) accumulated_condition.forbidden().clone();
 
         final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(current_node);
         for (Register register : writers.getUsedRegisters()) {
             final var may_writers = writers.ofRegister(register).getMayWriters();
             final var addr_link_kind = addr_link_map.getOrDefault(register, AddrLinkKind.NONE);
 
-            for (int writer_index = may_writers.size() - 1; writer_index >= 0; writer_index--) { /// Reverse program order
+            for (int writer_index = may_writers.size() - 1; writer_index >= 0; writer_index--) {
                 final var writer = may_writers.get(writer_index);
 
                 Event possible_border = writer; // status events are always writers tagged with MEMORY and are chunk borders
-                if (writer instanceof ExecutionStatus status && status.doesTrackDep()) { /// Executions status link handling.
+                if (writer instanceof ExecutionStatus status && status.doesTrackDep()) {
                     possible_border = status.getStatusEvent();
-                    addEvent(accumulated_condition.required(), writer);
-                    assert isChunkBorder(possible_border); // TODO: temp
                 }
 
-                /// Ich habe erst nur die Events als required auf einem Pfad markiert, die nicht implied sind.
-                /// Das habe ich dann temporär geändert (wodurch dann auch der ExecutionStatus case ausführlicher sein muss), aber das wäre ja auch nur ein strengthening der Conditions.
-                final var is_conditionally_must = exec.isImplied(current_node, writer) && false;
+                final var is_conditionally_must = exec.isImplied(current_node, writer);
 
                 final var is_chunk_border = isChunkBorder(possible_border);
 
                 if (is_chunk_border) {
                     final var info = edges_to_encode.merge(
                             Pair.of(possible_border, sink),
-                            new EdgeEncodingInfo(new ArrayList<>(), new BitSet(event_count), path_link_kind.add(addr_link_kind)),
-                            (i1, i2) -> new EdgeEncodingInfo(i1.conditions(), i1.eliminated_bits(), i1.addr_kind().merge(i2.addr_kind()))
+                            new EdgeEncodingInfo(new ArrayList<>(), path_link_kind.add(addr_link_kind)),
+                            (i1, i2) -> new EdgeEncodingInfo(i1.conditions(), i1.addr_kind().merge(i2.addr_kind()))
                     );
-                    info.conditions().add(new PathCondition(accumulated_condition)); /// Edge wird recorded mit einer Kopie der akkumulierten Condition auf dem aktuellen Path.
-
+                    info.conditions().add(new PathCondition(accumulated_condition));
                     addEvent(accumulated_condition.forbidden(), writer);
-                    if (writer instanceof ExecutionStatus status && status.doesTrackDep()) {
-                        removeEvent(accumulated_condition.required(), writer);
-                        addEvent(accumulated_condition.forbidden(), status.getStatusEvent());
-                    }
-                    /// Hier wird aktuell sowohl status event, als auch execution status zu forbidden hinzugefügt.
-                    /// Das hatte ich auch weggelassen (siehe Kommentar zu ExecutionCondition weiter oben), aber das hatte nichts geändert.
                     continue;
                 } else if (!is_conditionally_must) {
                     addEvent(accumulated_condition.required(), writer);
@@ -217,7 +201,6 @@ public class DataDependencyChunkAnalysis {
                 }
 
                 addEvent(accumulated_condition.forbidden(), writer);
-                // status events are chunk borders, so these updates are sufficient
                 if (!is_conditionally_must) removeEvent(accumulated_condition.required(), writer);
             }
 

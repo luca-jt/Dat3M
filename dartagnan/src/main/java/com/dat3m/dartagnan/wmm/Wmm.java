@@ -203,7 +203,7 @@ public class Wmm {
                 final Relation memory = getOrCreatePredefinedRelation(MEMORY);
                 //final Relation idd = getOrCreatePredefinedRelation(IDDTRANS);
                 final Relation addr = getOrCreatePredefinedRelation(ADDRDIRECT);
-                yield new Intersection(r, addr, product(memory, memory)); /// Die Definitionen von ADDRDIRECT und IDD haben sich so verändert, dass diese Definitionen von ADDR, DATA und CTRL korrekt sind.
+                yield new Intersection(r, addr, product(memory, memory));
             }
             case CTRL -> {
                 final Relation memory = getOrCreatePredefinedRelation(MEMORY);

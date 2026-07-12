@@ -104,33 +104,6 @@ public interface RelationAnalysis {
             logger.info(summary.toString());
         }
 
-        /*var k = a.getKnowledge(wmm.getRelation(com.dat3m.dartagnan.wmm.RelationNameRepository.DATA));
-        if (k != null) {
-            for (var e : k.getMaySet().getOutMap().entrySet()) {
-                for (var end : e.getValue()) {
-                    logger.info("DATA {} -> {}", e.getKey(), end);
-                }
-            }
-        }
-
-        k = a.getKnowledge(wmm.getRelation(com.dat3m.dartagnan.wmm.RelationNameRepository.ADDR));
-        if (k != null) {
-            for (var e : k.getMaySet().getOutMap().entrySet()) {
-                for (var end : e.getValue()) {
-                    logger.info("ADDR {} -> {}", e.getKey(), end);
-                }
-            }
-        }
-
-        k = a.getKnowledge(wmm.getRelation(com.dat3m.dartagnan.wmm.RelationNameRepository.CTRL));
-        if (k != null) {
-            for (var e : k.getMaySet().getOutMap().entrySet()) {
-                for (var end : e.getValue()) {
-                    logger.info("CTRL {} -> {}", e.getKey(), end);
-                }
-            }
-        }*/
-
         return a;
     }
 

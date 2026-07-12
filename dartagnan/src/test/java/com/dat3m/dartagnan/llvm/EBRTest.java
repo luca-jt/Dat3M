@@ -46,7 +46,7 @@ public class EBRTest extends AbstractCTest {
         return Arrays.asList(new Object[][]{
             {"ck_ebr", IMM, FAIL},
             {"ck_ebr", ARM8, PASS},
-            //{"ck_ebr", POWER, PASS},
+            {"ck_ebr", POWER, PASS},
             {"ck_ebr", RISCV, PASS},
             {"ck_ebr", TSO, PASS},
         });

@@ -43,7 +43,6 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static com.dat3m.dartagnan.program.Register.UsageType.*;
 import static com.dat3m.dartagnan.program.event.Tag.*;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -626,7 +625,7 @@ public class NativeRelationAnalysis implements RelationAnalysis {
             return computeDependencyChunkDependencies(DataDependencyChunkAnalysis.AddrLinkKind.PURE);
         }
 
-        private MutableKnowledge computeDependencyChunkDependencies(DataDependencyChunkAnalysis.AddrLinkKind exclude_link_kind) { /// Edges werden nach link type gefiltert.
+        private MutableKnowledge computeDependencyChunkDependencies(DataDependencyChunkAnalysis.AddrLinkKind exclude_link_kind) {
             final IndexedEventGraph may = new IndexedEventGraph(allEvents);
             final IndexedEventGraph must = new IndexedEventGraph(allEvents);
 
@@ -1015,6 +1014,17 @@ public class NativeRelationAnalysis implements RelationAnalysis {
                     }
                     for (Event regWriter : reachDef.getMustWriters()) {
                         must.add(regWriter, regReader);
+                    }
+                }
+            }
+
+            // We need to track ExecutionStatus events separately, because they induce data-dependencies
+            // without reading from a register.
+            if (usageTypes.contains(UsageType.DATA)) {
+                for (ExecutionStatus execStatus : program.getThreadEvents(ExecutionStatus.class)) {
+                    if (execStatus.doesTrackDep()) {
+                        may.add(execStatus.getStatusEvent(), execStatus);
+                        must.add(execStatus.getStatusEvent(), execStatus);
                     }
                 }
             }
