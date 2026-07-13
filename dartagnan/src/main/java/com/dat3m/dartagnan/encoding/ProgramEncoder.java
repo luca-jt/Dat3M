@@ -21,6 +21,7 @@ import com.dat3m.dartagnan.program.memory.MemoryObject;
 import com.dat3m.dartagnan.verification.Context;
 import com.dat3m.dartagnan.wmm.RelationNameRepository;
 import com.dat3m.dartagnan.wmm.analysis.DataDependencyChunkAnalysis;
+import com.dat3m.dartagnan.wmm.analysis.PathCondition;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
@@ -31,10 +32,13 @@ import org.sosy_lab.common.configuration.InvalidConfigurationException;
 import org.sosy_lab.common.configuration.Option;
 import org.sosy_lab.common.configuration.Options;
 import org.sosy_lab.java_smt.api.*;
+import org.apache.commons.lang3.tuple.Pair;
 
 import java.math.BigInteger;
 import java.util.*;
 import java.util.function.BiFunction;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static com.dat3m.dartagnan.configuration.OptionNames.IGNORE_FILTER_SPECIFICATION;
 import static com.dat3m.dartagnan.configuration.OptionNames.INITIALIZE_REGISTERS;
@@ -716,22 +720,52 @@ public class ProgramEncoder {
 
         List<BooleanFormula> enc = new ArrayList<>();
 
-        chunkAnalysis.getEdgesToEncode().filter(e -> !e.getValue().conditions().isEmpty()).forEach(edge_entry -> {
+        chunkAnalysis.getFullEdgesToEncode().filter(e -> !e.getValue().conditions().isEmpty()).forEach(edge_entry -> {
             final var from = edge_entry.getKey().getLeft();
             final var to = edge_entry.getKey().getRight();
-
-            final List<BooleanFormula> path_encodings = new ArrayList<>();
-            for (var path_condition : edge_entry.getValue().conditions()) {
-                final List<BooleanFormula> path_cond_formulas = new ArrayList<>(chunkAnalysis.eventStreamOfSet(path_condition.required(), from.getThread()).map(context::execution).toList());
-                final List<BooleanFormula> forbidden = chunkAnalysis.eventStreamOfSet(path_condition.forbidden(), from.getThread()).map(context::execution).toList();
-                path_cond_formulas.add(bmgr.not(bmgr.or(forbidden)));
-                path_encodings.add(bmgr.and(path_cond_formulas));
-            }
-
+            final var path_encodings = getPathConditionEncodings(edge_entry.getValue().conditions(), from.getThread());
             enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(context.execution(from), context.controlFlow(to), bmgr.or(path_encodings))));
         });
 
+        chunkAnalysis.getLinkedEdgesToEncode().forEach(edge_entry -> {
+            final var from = edge_entry.getKey().getLeft();
+            final var to = edge_entry.getKey().getRight();
+            final var thread = from.getThread();
+            final var info = edge_entry.getValue();
+
+            final List<BooleanFormula> link_variables = new ArrayList<>(info.phantoms().size() + 1);
+
+            final var first_link = bmgr.makeVariable("link_" + from.getGlobalId() + "_phantom" + info.phantoms().get(0).generation());
+            link_variables.add(first_link);
+            enc.add(bmgr.equivalence(first_link, bmgr.or(getPathConditionEncodings(info.link_infos().get(0).conditions(), thread))));
+
+            for (int i = 1; i < info.phantoms().size() - 1; i++) {
+                final var from_phantom = info.phantoms().get(i);
+                final var to_phantom = info.phantoms().get(i + 1);
+                final var link = bmgr.makeVariable("link_phantom" + from_phantom.generation() + "_phantom" + to_phantom.generation());
+                link_variables.add(link);
+                enc.add(bmgr.equivalence(link, bmgr.or(getPathConditionEncodings(info.link_infos().get(i).conditions(), thread))));
+            }
+
+            final var last_link = bmgr.makeVariable("link_phantom" + info.phantoms().get(info.phantoms().size() - 1).generation() + "_" + to.getGlobalId());
+            link_variables.add(last_link);
+            enc.add(bmgr.equivalence(last_link, bmgr.or(getPathConditionEncodings(info.link_infos().get(info.link_infos().size() - 1).conditions(), thread))));
+
+            enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(link_variables)));
+        });
+
         return bmgr.and(enc);
+    }
+
+    private List<BooleanFormula> getPathConditionEncodings(List<PathCondition> conditions, Thread thread) {
+        final List<BooleanFormula> path_encodings = new ArrayList<>();
+        for (var path_condition : conditions) {
+            final List<BooleanFormula> path_cond_formulas = new ArrayList<>(chunkAnalysis.eventStreamOfSet(path_condition.required(), thread).map(context::execution).toList());
+            final List<BooleanFormula> forbidden = chunkAnalysis.eventStreamOfSet(path_condition.forbidden(), thread).map(context::execution).toList();
+            path_cond_formulas.add(bmgr.not(bmgr.or(forbidden)));
+            path_encodings.add(bmgr.and(path_cond_formulas));
+        }
+        return path_encodings;
     }
 
     public BooleanFormula encodeDataDependenciesOld() {

@@ -629,8 +629,8 @@ public class NativeRelationAnalysis implements RelationAnalysis {
             final IndexedEventGraph may = new IndexedEventGraph(allEvents);
             final IndexedEventGraph must = new IndexedEventGraph(allEvents);
 
-            chunkAnalysis.getEdgesToEncode().filter(e -> e.getValue().addr_kind().index != exclude_link_kind.index).forEach(edge_entry -> {
-                final var is_must = edge_entry.getValue().conditions().isEmpty();
+            chunkAnalysis.getEdgeInfos().filter(e -> e.getValue().link_kind().index != exclude_link_kind.index).forEach(edge_entry -> {
+                final var is_must = edge_entry.getValue().is_must();
                 final var from = edge_entry.getKey().getLeft();
                 final var to = edge_entry.getKey().getRight();
                 may.add(from, to);

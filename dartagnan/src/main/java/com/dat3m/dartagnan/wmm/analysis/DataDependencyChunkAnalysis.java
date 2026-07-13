@@ -1,12 +1,10 @@
 package com.dat3m.dartagnan.wmm.analysis;
 
 import com.dat3m.dartagnan.program.Register;
+import com.dat3m.dartagnan.program.analysis.BackwardsReachingDefinitionsAnalysis;
 import com.dat3m.dartagnan.program.analysis.ExecutionAnalysis;
 import com.dat3m.dartagnan.program.analysis.ReachingDefinitionsAnalysis;
-import com.dat3m.dartagnan.program.event.Event;
-import com.dat3m.dartagnan.program.event.RegReader;
-import com.dat3m.dartagnan.program.event.RegWriter;
-import com.dat3m.dartagnan.program.event.Tag;
+import com.dat3m.dartagnan.program.event.*;
 import com.dat3m.dartagnan.program.event.core.CondJump;
 import com.dat3m.dartagnan.program.event.core.ExecutionStatus;
 import com.dat3m.dartagnan.verification.Context;
@@ -39,7 +37,16 @@ public class DataDependencyChunkAnalysis {
     private boolean analysis_ran = false;
     private com.dat3m.dartagnan.program.Thread current_thread = null;
 
+    private final Map<List<RegWriter>, PhantomEvent> phantom_event_map;
+    private final Set<Register> registers_with_phantom_events;
+    private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode_with_phantom_start;
+    private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode_with_phantom_end;
+    private final Map<PhantomEvent, List<Pair<Event, RegReader>>> edge_keys_for_phantom_end_edges;
+    private final Map<Pair<Event, RegReader>, LinkedEdgeEncodingInfo> linked_edges;
+
     public record EdgeEncodingInfo(List<PathCondition> conditions, AddrLinkKind addr_kind) {}
+
+    public record LinkedEdgeEncodingInfo(List<EdgeEncodingInfo> link_infos, List<PhantomEvent> phantoms) {}
 
     enum AddrLinkKind {
         NONE(0x1), PURE(0x2), PART(0x3);
@@ -75,6 +82,12 @@ public class DataDependencyChunkAnalysis {
         edges_to_encode = new LinkedHashMap<>();
         visited_sinks = new HashSet<>();
         event_bit_indices = new HashMap<>();
+        phantom_event_map = new HashMap<>();
+        registers_with_phantom_events = new HashSet<>();
+        edges_to_encode_with_phantom_start = new HashMap<>();
+        edges_to_encode_with_phantom_end = new HashMap<>();
+        edge_keys_for_phantom_end_edges = new HashMap<>();
+        linked_edges = new HashMap<>();
     }
 
     private void runAnalysis() {
@@ -106,6 +119,8 @@ public class DataDependencyChunkAnalysis {
                 bit_index_map.put(all_condition_events.get(i), i);
             }
             visited_sinks.clear();
+            phantom_event_map.clear();
+            registers_with_phantom_events.clear();
 
             for (RegReader possible_sink : reverse(sink_event_list)) {
                 if (!isChunkBorder(possible_sink)) continue;
@@ -114,27 +129,57 @@ public class DataDependencyChunkAnalysis {
             }
         }
 
-        edges_to_encode.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty()).forEach(e -> {
+        Stream.concat(Stream.concat(
+                edges_to_encode.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty()),
+                edges_to_encode_with_phantom_end.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty())),
+                edges_to_encode_with_phantom_start.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty())
+        ).forEach(e -> {
             final var info = e.getValue();
-
             if (info.conditions().stream().anyMatch(PathCondition::isStructAndCondMust)) {
                 info.conditions().clear();
             }
         });
 
+        for (var start_entry : edges_to_encode_with_phantom_start.entrySet()) { // TODO: there can not only be a single phantom node in one edge!!! add new map for edges between phantoms and change the edge recording
+            final var phantom = (PhantomEvent) start_entry.getKey().getLeft();
+            for (var phantom_end_edge : edge_keys_for_phantom_end_edges.get(phantom)) {
+                final var resulting_edge = Pair.of(phantom_end_edge.getLeft(), start_entry.getKey().getRight());
+                linked_edges.merge(resulting_edge, List.of(start_entry.getValue(), edges_to_encode_with_phantom_end.get(phantom_end_edge)), (l1, l2) -> {
+                    final List<EdgeEncodingInfo> result = new ArrayList<>(l1.size() + l2.size());
+                    result.addAll(l1);
+                    result.addAll(l2);
+                    return result;
+                });
+            }
+        }
+
         logger.info("End of DataDependencyAnalysis");
     }
 
-    public Stream<Map.Entry<Pair<Event, RegReader>, EdgeEncodingInfo>> getEdgesToEncode() {
+    public record EdgeInfo(boolean is_must, AddrLinkKind link_kind) {}
+
+    public Stream<Pair<Pair<Event, RegReader>, EdgeInfo>> getEdgeInfos() {
         if (!analysis_ran) {
             runAnalysis();
             analysis_ran = true;
         }
+        return Stream.concat(
+                edges_to_encode.entrySet().stream().map(e -> Pair.of(e.getKey(), new EdgeInfo(e.getValue().conditions().isEmpty(), e.getValue().addr_kind()))),
+                linked_edges.entrySet().stream().map(e -> Pair.of(e.getKey(), new EdgeInfo(false, e.getValue().link_infos().stream().map(EdgeEncodingInfo::addr_kind).reduce(AddrLinkKind.NONE, AddrLinkKind::add))))
+        );
+    }
+
+    public Stream<Map.Entry<Pair<Event, RegReader>, EdgeEncodingInfo>> getFullEdgesToEncode() {
         return edges_to_encode.entrySet().stream();
     }
 
+    public Stream<Map.Entry<Pair<Event, RegReader>, LinkedEdgeEncodingInfo>> getLinkedEdgesToEncode() {
+        return linked_edges.entrySet().stream();
+    }
+
     public boolean edgeExists(Event e1, RegReader e2) {
-        return edges_to_encode.containsKey(Pair.of(e1, e2));
+        final var edge_key = Pair.of(e1, e2);
+        return edges_to_encode.containsKey(edge_key) || linked_edges.containsKey(edge_key);
     }
 
     private void addEvent(BitSet bits, Event event) {
@@ -156,6 +201,36 @@ public class DataDependencyChunkAnalysis {
         return event instanceof CondJump jump && !(jump.isGoto() || jump.isDead());
     }
 
+    private void recordEdge(Event from, RegReader to, PathCondition condition, AddrLinkKind edge_kind) {
+        final var edge_key = Pair.of(from, to);
+
+        final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edge_encoding_map_to_use;
+
+        if (from instanceof PhantomEvent) {
+            edge_encoding_map_to_use = edges_to_encode_with_phantom_start;
+        } else if (to instanceof PhantomEvent phantom) {
+            edge_encoding_map_to_use = edges_to_encode_with_phantom_end;
+            final var edge_list = edge_keys_for_phantom_end_edges.computeIfAbsent(phantom, p -> new ArrayList<>());
+            edge_list.add(edge_key);
+        } else {
+            edge_encoding_map_to_use = edges_to_encode;
+        }
+
+        final var info = edge_encoding_map_to_use.merge(
+                edge_key,
+                new EdgeEncodingInfo(new ArrayList<>(), edge_kind),
+                (i1, i2) -> new EdgeEncodingInfo(i1.conditions(), i1.addr_kind().merge(i2.addr_kind()))
+        );
+        if (info.conditions().isEmpty() || !info.conditions().get(0).isStructAndCondMust()) {
+            info.conditions().add(new PathCondition(condition));
+            if (condition.isStructAndCondMust()) {
+                info.conditions().removeIf(c -> !c.isStructAndCondMust());
+            }
+        }
+    }
+
+    static final int PHANTOM_NODE_BOUND = 4;
+
     private void addDependencyEdge(RegReader current_node, RegReader sink, PathCondition accumulated_condition, AddrLinkKind path_link_kind) {
         final var addr_link_map = new HashMap<Register, AddrLinkKind>();
         if (current_node == sink) {
@@ -171,6 +246,28 @@ public class DataDependencyChunkAnalysis {
             final var may_writers = writers.ofRegister(register).getMayWriters();
             final var addr_link_kind = addr_link_map.getOrDefault(register, AddrLinkKind.NONE);
 
+            var new_sink = sink;
+
+            final var existing_phantom = phantom_event_map.get(may_writers);
+            if (existing_phantom != null) {
+                assert current_node != sink;
+                recordEdge(existing_phantom, sink, accumulated_condition, path_link_kind);
+                continue;
+            }
+
+            final var phantom_needed = may_writers.size() > PHANTOM_NODE_BOUND
+                    && current_node != sink
+                    && !registers_with_phantom_events.contains(register)
+                    && ((BackwardsReachingDefinitionsAnalysis) definitions).getReaders(may_writers.get(may_writers.size() - 1)).getReaders().size() > PHANTOM_NODE_BOUND;
+
+            if (phantom_needed) {
+                registers_with_phantom_events.add(register);
+                final var phantom = PhantomEvent.create();
+                phantom_event_map.put(may_writers, phantom);
+                recordEdge(phantom, sink, accumulated_condition, path_link_kind);
+                new_sink = phantom;
+            }
+
             for (int writer_index = may_writers.size() - 1; writer_index >= 0; writer_index--) {
                 final var writer = may_writers.get(writer_index);
 
@@ -184,20 +281,15 @@ public class DataDependencyChunkAnalysis {
                 final var is_chunk_border = isChunkBorder(possible_border);
 
                 if (is_chunk_border) {
-                    final var info = edges_to_encode.merge(
-                            Pair.of(possible_border, sink),
-                            new EdgeEncodingInfo(new ArrayList<>(), path_link_kind.add(addr_link_kind)),
-                            (i1, i2) -> new EdgeEncodingInfo(i1.conditions(), i1.addr_kind().merge(i2.addr_kind()))
-                    );
-                    info.conditions().add(new PathCondition(accumulated_condition));
+                    recordEdge(possible_border, new_sink, accumulated_condition, path_link_kind.add(addr_link_kind));
                     addEvent(accumulated_condition.forbidden(), writer);
                     continue;
-                } else if (!is_conditionally_must) {
-                    addEvent(accumulated_condition.required(), writer);
                 }
 
+                if (!is_conditionally_must) addEvent(accumulated_condition.required(), writer);
+
                 if (possible_border instanceof RegReader reader) {
-                    addDependencyEdge(reader, sink, accumulated_condition, path_link_kind.add(addr_link_kind));
+                    addDependencyEdge(reader, new_sink, accumulated_condition, path_link_kind.add(addr_link_kind));
                 }
 
                 addEvent(accumulated_condition.forbidden(), writer);
