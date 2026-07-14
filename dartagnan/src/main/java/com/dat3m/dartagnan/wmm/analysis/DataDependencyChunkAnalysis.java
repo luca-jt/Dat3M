@@ -42,12 +42,14 @@ public class DataDependencyChunkAnalysis {
     private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode_with_phantom_start;
     private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode_with_phantom_end;
     private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode_with_both_phantom;
-    private final Map<PhantomEvent, List<Pair<Event, RegReader>>> edge_keys_for_phantom_start_edges;
-    private final Map<Pair<Event, RegReader>, LinkedEdgeEncodingInfo> linked_edges;
+    private final Map<PhantomEvent, Set<Pair<Event, RegReader>>> edge_keys_for_phantom_start_edges;
+    private final Map<Pair<Event, RegReader>, List<EncodingInfo>> final_edges;
 
-    public record EdgeEncodingInfo(List<PathCondition> conditions, AddrLinkKind addr_kind) {}
+    public interface EncodingInfo {}
 
-    public record LinkedEdgeEncodingInfo(List<EdgeEncodingInfo> link_infos, List<PhantomEvent> phantoms) {
+    public record EdgeEncodingInfo(List<PathCondition> conditions, AddrLinkKind addr_kind) implements EncodingInfo {}
+
+    public record LinkedEdgeEncodingInfo(List<EdgeEncodingInfo> link_infos, List<PhantomEvent> phantoms) implements EncodingInfo {
         static LinkedEdgeEncodingInfo clone(LinkedEdgeEncodingInfo other) {
             return new LinkedEdgeEncodingInfo(new ArrayList<>(other.link_infos()), new ArrayList<>(other.phantoms()));
         }
@@ -93,7 +95,7 @@ public class DataDependencyChunkAnalysis {
         edges_to_encode_with_phantom_end = new LinkedHashMap<>();
         edges_to_encode_with_both_phantom = new LinkedHashMap<>();
         edge_keys_for_phantom_start_edges = new HashMap<>();
-        linked_edges = new LinkedHashMap<>();
+        final_edges = new LinkedHashMap<>();
     }
 
     private void runAnalysis() {
@@ -147,20 +149,26 @@ public class DataDependencyChunkAnalysis {
             }
         });
 
+        for (var entry : edges_to_encode.entrySet()) {
+            final_edges.merge(entry.getKey(), List.of(entry.getValue()), (l1, l2) -> {
+                final List<EncodingInfo> result = new ArrayList<>(l1.size() + l2.size());
+                result.addAll(l1);
+                result.addAll(l2);
+                return result;
+            });
+        }
+
         for (var start_entry : edges_to_encode_with_phantom_end.entrySet()) {
             final List<Pair<RegReader, LinkedEdgeEncodingInfo>> edge_ends = new ArrayList<>();
             buildLinkedEdgeConditions(start_entry.getKey(), edge_ends, new LinkedEdgeEncodingInfo(new ArrayList<>(), new ArrayList<>()));
             for (var edge_end : edge_ends) {
-                final var prev = linked_edges.put(Pair.of(start_entry.getKey().getLeft(), edge_end.getKey()), edge_end.getValue());
-                assert prev == null; // TODO: can there be more than one link chain between pairs?
+                final_edges.merge(Pair.of(start_entry.getKey().getLeft(), edge_end.getKey()), List.of(edge_end.getValue()), (l1, l2) -> {
+                    final List<EncodingInfo> result = new ArrayList<>(l1.size() + l2.size());
+                    result.addAll(l1);
+                    result.addAll(l2);
+                    return result;
+                });
             }
-        }
-
-        for (var e : edges_to_encode.keySet()) { // TODO: one edge could be contained in more than one map?
-            assert !linked_edges.containsKey(e);
-        }
-        for (var e : linked_edges.keySet()) {
-            assert !edges_to_encode.containsKey(e);
         }
 
         logger.info("End of DataDependencyAnalysis");
@@ -206,27 +214,30 @@ public class DataDependencyChunkAnalysis {
             runAnalysis();
             analysis_ran = true;
         }
-        return Stream.concat(
-                edges_to_encode.entrySet().stream().map(e -> Pair.of(e.getKey(), new EdgeInfo(e.getValue().conditions().isEmpty(), e.getValue().addr_kind()))),
-                linked_edges.entrySet().stream().map(e -> Pair.of(e.getKey(), new EdgeInfo(false, e.getValue().link_infos().stream().map(EdgeEncodingInfo::addr_kind).reduce(AddrLinkKind.NONE, AddrLinkKind::add))))
-        );
+        return final_edges.entrySet().stream().map(e -> {
+            var is_must = false;
+            for (var it : e.getValue()) {
+                if (it instanceof EdgeEncodingInfo info && info.conditions().isEmpty()) {
+                    is_must = true;
+                    break;
+                }
+            }
+            final var link_kind = e.getValue().stream().map(i -> i instanceof EdgeEncodingInfo info ? info.addr_kind() : ((LinkedEdgeEncodingInfo) i).link_infos().stream().map(EdgeEncodingInfo::addr_kind).reduce(AddrLinkKind.NONE, AddrLinkKind::add)).reduce(AddrLinkKind::merge);
+            assert link_kind.isPresent();
+            return Pair.of(e.getKey(), new EdgeInfo(is_must, link_kind.get()));
+        });
     }
 
-    public Stream<Map.Entry<Pair<Event, RegReader>, EdgeEncodingInfo>> getFullEdgesToEncode() {
+    public Stream<Map.Entry<Pair<Event, RegReader>, List<EncodingInfo>>> getFullEdgesToEncode() {
         if (!analysis_ran) {
             runAnalysis();
             analysis_ran = true;
         }
-        return edges_to_encode.entrySet().stream();
-    }
-
-    public Stream<Map.Entry<Pair<Event, RegReader>, LinkedEdgeEncodingInfo>> getLinkedEdgesToEncode() {
-        return linked_edges.entrySet().stream();
+        return final_edges.entrySet().stream();
     }
 
     public boolean edgeExists(Event e1, RegReader e2) {
-        final var edge_key = Pair.of(e1, e2);
-        return edges_to_encode.containsKey(edge_key) || linked_edges.containsKey(edge_key);
+        return final_edges.containsKey(Pair.of(e1, e2));
     }
 
     private void addEvent(BitSet bits, Event event) {
@@ -255,11 +266,11 @@ public class DataDependencyChunkAnalysis {
 
         if (from instanceof PhantomEvent phantom_start && to instanceof PhantomEvent) {
             edge_encoding_map_to_use = edges_to_encode_with_both_phantom;
-            final var edge_list = edge_keys_for_phantom_start_edges.computeIfAbsent(phantom_start, p -> new ArrayList<>());
+            final var edge_list = edge_keys_for_phantom_start_edges.computeIfAbsent(phantom_start, p -> new LinkedHashSet<>());
             edge_list.add(edge_key);
         } else if (from instanceof PhantomEvent phantom) {
             edge_encoding_map_to_use = edges_to_encode_with_phantom_start;
-            final var edge_list = edge_keys_for_phantom_start_edges.computeIfAbsent(phantom, p -> new ArrayList<>());
+            final var edge_list = edge_keys_for_phantom_start_edges.computeIfAbsent(phantom, p -> new LinkedHashSet<>());
             edge_list.add(edge_key);
         } else if (to instanceof PhantomEvent) {
             edge_encoding_map_to_use = edges_to_encode_with_phantom_end;

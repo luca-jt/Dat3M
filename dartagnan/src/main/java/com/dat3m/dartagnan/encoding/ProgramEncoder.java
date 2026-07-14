@@ -719,42 +719,49 @@ public class ProgramEncoder {
         logger.info("Encoding data dependencies.");
 
         List<BooleanFormula> enc = new ArrayList<>();
+        final Map<Pair<Event, RegReader>, BooleanFormula> known_link_encodings = new HashMap<>();
 
-        chunkAnalysis.getFullEdgesToEncode().filter(e -> !e.getValue().conditions().isEmpty()).forEach(edge_entry -> {
+        chunkAnalysis.getFullEdgesToEncode().forEach(edge_entry -> {
             final var from = edge_entry.getKey().getLeft();
             final var to = edge_entry.getKey().getRight();
-            final var path_encodings = getPathConditionEncodings(edge_entry.getValue().conditions(), from.getThread());
-            enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(context.execution(from), context.controlFlow(to), bmgr.or(path_encodings))));
-        });
-
-        chunkAnalysis.getLinkedEdgesToEncode().forEach(edge_entry -> {
-            final var from = edge_entry.getKey().getLeft();
-            final var to = edge_entry.getKey().getRight();
-            final var thread = from.getThread();
-            final var info = edge_entry.getValue();
-
-            final List<BooleanFormula> link_variables = new ArrayList<>(info.phantoms().size() + 1);
-
-            final var first_link = bmgr.makeVariable("link_" + from.getGlobalId() + "_phantom" + info.phantoms().get(0).generation());
-            link_variables.add(first_link);
-            enc.add(bmgr.equivalence(first_link, getPathConditionEncodings(info.link_infos().get(0).conditions(), thread)));
-
-            for (int i = 1; i < info.phantoms().size(); i++) {
-                final var from_phantom = info.phantoms().get(i);
-                final var to_phantom = info.phantoms().get(i + 1);
-                final var link = bmgr.makeVariable("link_phantom" + from_phantom.generation() + "_phantom" + to_phantom.generation());
-                link_variables.add(link);
-                enc.add(bmgr.equivalence(link, getPathConditionEncodings(info.link_infos().get(i).conditions(), thread)));
-            }
-
-            final var last_link = bmgr.makeVariable("link_phantom" + info.phantoms().get(info.phantoms().size() - 1).generation() + "_" + to.getGlobalId());
-            link_variables.add(last_link);
-            enc.add(bmgr.equivalence(last_link, getPathConditionEncodings(info.link_infos().get(info.link_infos().size() - 1).conditions(), thread)));
-
-            enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(context.execution(from), context.controlFlow(to), bmgr.and(link_variables))));
+            final var condition_formula = bmgr.or(edge_entry.getValue().stream().map(i -> getEncodingInfoEncoding(i, from, to, enc, known_link_encodings)).toList());
+            enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(context.execution(from), context.controlFlow(to), condition_formula)));
         });
 
         return bmgr.and(enc);
+    }
+
+    private BooleanFormula getEncodingInfoEncoding(DataDependencyChunkAnalysis.EncodingInfo info, Event from, RegReader to, List<BooleanFormula> enc, Map<Pair<Event, RegReader>, BooleanFormula> known_link_encodings) {
+        if (info instanceof DataDependencyChunkAnalysis.EdgeEncodingInfo direct_info) {
+            return getPathConditionEncodings(direct_info.conditions(), from.getThread());
+        } else if (info instanceof DataDependencyChunkAnalysis.LinkedEdgeEncodingInfo linked_info) {
+            final List<BooleanFormula> link_variables = new ArrayList<>(linked_info.phantoms().size() + 1);
+
+            final var first_link = bmgr.makeVariable("link_" + from.getGlobalId() + "_phantom" + linked_info.phantoms().get(0).generation());
+            link_variables.add(first_link);
+            final var first_link_encoding = known_link_encodings.computeIfAbsent(Pair.of(from, linked_info.phantoms().get(0)), k -> getPathConditionEncodings(linked_info.link_infos().get(0).conditions(), from.getThread()));
+            enc.add(bmgr.equivalence(first_link, first_link_encoding));
+
+            for (int i = 0; i < linked_info.phantoms().size() - 1; i++) {
+                final var from_phantom = linked_info.phantoms().get(i);
+                final var to_phantom = linked_info.phantoms().get(i + 1);
+                final var link = bmgr.makeVariable("link_phantom" + from_phantom.generation() + "_phantom" + to_phantom.generation());
+                link_variables.add(link);
+                final int final_i = i;
+                final var link_encoding = known_link_encodings.computeIfAbsent(Pair.of(from_phantom, to_phantom), k -> getPathConditionEncodings(linked_info.link_infos().get(final_i + 1).conditions(), from.getThread()));
+                enc.add(bmgr.equivalence(link, link_encoding));
+            }
+
+            final var last_link = bmgr.makeVariable("link_phantom" + linked_info.phantoms().get(linked_info.phantoms().size() - 1).generation() + "_" + to.getGlobalId());
+            link_variables.add(last_link);
+            final var last_link_encoding = known_link_encodings.computeIfAbsent(Pair.of(linked_info.phantoms().get(linked_info.phantoms().size() - 1), to), k -> getPathConditionEncodings(linked_info.link_infos().get(linked_info.link_infos().size() - 1).conditions(), from.getThread()));
+            enc.add(bmgr.equivalence(last_link, last_link_encoding));
+
+            return bmgr.and(link_variables);
+        } else {
+            assert false;
+        }
+        return null;
     }
 
     private BooleanFormula getPathConditionEncodings(List<PathCondition> conditions, Thread thread) {
