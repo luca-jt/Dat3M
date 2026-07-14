@@ -41,12 +41,17 @@ public class DataDependencyChunkAnalysis {
     private final Set<Register> registers_with_phantom_events;
     private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode_with_phantom_start;
     private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode_with_phantom_end;
-    private final Map<PhantomEvent, List<Pair<Event, RegReader>>> edge_keys_for_phantom_end_edges;
+    private final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edges_to_encode_with_both_phantom;
+    private final Map<PhantomEvent, List<Pair<Event, RegReader>>> edge_keys_for_phantom_start_edges;
     private final Map<Pair<Event, RegReader>, LinkedEdgeEncodingInfo> linked_edges;
 
     public record EdgeEncodingInfo(List<PathCondition> conditions, AddrLinkKind addr_kind) {}
 
-    public record LinkedEdgeEncodingInfo(List<EdgeEncodingInfo> link_infos, List<PhantomEvent> phantoms) {}
+    public record LinkedEdgeEncodingInfo(List<EdgeEncodingInfo> link_infos, List<PhantomEvent> phantoms) {
+        static LinkedEdgeEncodingInfo clone(LinkedEdgeEncodingInfo other) {
+            return new LinkedEdgeEncodingInfo(new ArrayList<>(other.link_infos()), new ArrayList<>(other.phantoms()));
+        }
+    }
 
     enum AddrLinkKind {
         NONE(0x1), PURE(0x2), PART(0x3);
@@ -84,10 +89,11 @@ public class DataDependencyChunkAnalysis {
         event_bit_indices = new HashMap<>();
         phantom_event_map = new HashMap<>();
         registers_with_phantom_events = new HashSet<>();
-        edges_to_encode_with_phantom_start = new HashMap<>();
-        edges_to_encode_with_phantom_end = new HashMap<>();
-        edge_keys_for_phantom_end_edges = new HashMap<>();
-        linked_edges = new HashMap<>();
+        edges_to_encode_with_phantom_start = new LinkedHashMap<>();
+        edges_to_encode_with_phantom_end = new LinkedHashMap<>();
+        edges_to_encode_with_both_phantom = new LinkedHashMap<>();
+        edge_keys_for_phantom_start_edges = new HashMap<>();
+        linked_edges = new LinkedHashMap<>();
     }
 
     private void runAnalysis() {
@@ -129,10 +135,11 @@ public class DataDependencyChunkAnalysis {
             }
         }
 
-        Stream.concat(Stream.concat(
+        Stream.concat(Stream.concat(Stream.concat(
                 edges_to_encode.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty()),
                 edges_to_encode_with_phantom_end.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty())),
-                edges_to_encode_with_phantom_start.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty())
+                edges_to_encode_with_phantom_start.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty())),
+                edges_to_encode_with_both_phantom.entrySet().stream().filter(e -> !e.getValue().conditions().isEmpty())
         ).forEach(e -> {
             final var info = e.getValue();
             if (info.conditions().stream().anyMatch(PathCondition::isStructAndCondMust)) {
@@ -140,20 +147,56 @@ public class DataDependencyChunkAnalysis {
             }
         });
 
-        for (var start_entry : edges_to_encode_with_phantom_start.entrySet()) { // TODO: there can not only be a single phantom node in one edge!!! add new map for edges between phantoms and change the edge recording
-            final var phantom = (PhantomEvent) start_entry.getKey().getLeft();
-            for (var phantom_end_edge : edge_keys_for_phantom_end_edges.get(phantom)) {
-                final var resulting_edge = Pair.of(phantom_end_edge.getLeft(), start_entry.getKey().getRight());
-                linked_edges.merge(resulting_edge, List.of(start_entry.getValue(), edges_to_encode_with_phantom_end.get(phantom_end_edge)), (l1, l2) -> {
-                    final List<EdgeEncodingInfo> result = new ArrayList<>(l1.size() + l2.size());
-                    result.addAll(l1);
-                    result.addAll(l2);
-                    return result;
-                });
+        for (var start_entry : edges_to_encode_with_phantom_end.entrySet()) {
+            final List<Pair<RegReader, LinkedEdgeEncodingInfo>> edge_ends = new ArrayList<>();
+            buildLinkedEdgeConditions(start_entry.getKey(), edge_ends, new LinkedEdgeEncodingInfo(new ArrayList<>(), new ArrayList<>()));
+            for (var edge_end : edge_ends) {
+                final var prev = linked_edges.put(Pair.of(start_entry.getKey().getLeft(), edge_end.getKey()), edge_end.getValue());
+                assert prev == null; // TODO: can there be more than one link chain between pairs?
             }
         }
 
+        for (var e : edges_to_encode.keySet()) { // TODO: one edge could be contained in more than one map?
+            assert !linked_edges.containsKey(e);
+        }
+        for (var e : linked_edges.keySet()) {
+            assert !edges_to_encode.containsKey(e);
+        }
+
         logger.info("End of DataDependencyAnalysis");
+    }
+
+    private void buildLinkedEdgeConditions(Pair<Event, RegReader> first_edge_link, List<Pair<RegReader, LinkedEdgeEncodingInfo>> edge_ends, LinkedEdgeEncodingInfo info_builder) {
+        final var from = first_edge_link.getLeft();
+        final var to = first_edge_link.getRight();
+        if (from instanceof PhantomEvent && to instanceof PhantomEvent to_phantom) {
+            final var info = edges_to_encode_with_both_phantom.get(first_edge_link);
+            info_builder.link_infos().add(info);
+            info_builder.phantoms().add(to_phantom);
+            final var next_edges = edge_keys_for_phantom_start_edges.get(to_phantom);
+            for (var next_edge : next_edges) {
+                buildLinkedEdgeConditions(next_edge, edge_ends, info_builder);
+            }
+            info_builder.link_infos().remove(info_builder.link_infos().size() - 1);
+            info_builder.phantoms().remove(info_builder.phantoms().size() - 1);
+        } else if (from instanceof PhantomEvent) {
+            final var info = edges_to_encode_with_phantom_start.get(first_edge_link);
+            info_builder.link_infos().add(info);
+            edge_ends.add(Pair.of(first_edge_link.getRight(), LinkedEdgeEncodingInfo.clone(info_builder)));
+            info_builder.link_infos().remove(info_builder.link_infos().size() - 1);
+        } else if (to instanceof PhantomEvent phantom) {
+            final var info = edges_to_encode_with_phantom_end.get(first_edge_link);
+            info_builder.link_infos().add(info);
+            info_builder.phantoms().add(phantom);
+            final var next_edges = edge_keys_for_phantom_start_edges.get(phantom);
+            for (var next_edge : next_edges) {
+                buildLinkedEdgeConditions(next_edge, edge_ends, info_builder);
+            }
+            info_builder.link_infos().remove(info_builder.link_infos().size() - 1);
+            info_builder.phantoms().remove(info_builder.phantoms().size() - 1);
+        } else {
+            assert false;
+        }
     }
 
     public record EdgeInfo(boolean is_must, AddrLinkKind link_kind) {}
@@ -170,6 +213,10 @@ public class DataDependencyChunkAnalysis {
     }
 
     public Stream<Map.Entry<Pair<Event, RegReader>, EdgeEncodingInfo>> getFullEdgesToEncode() {
+        if (!analysis_ran) {
+            runAnalysis();
+            analysis_ran = true;
+        }
         return edges_to_encode.entrySet().stream();
     }
 
@@ -206,12 +253,16 @@ public class DataDependencyChunkAnalysis {
 
         final Map<Pair<Event, RegReader>, EdgeEncodingInfo> edge_encoding_map_to_use;
 
-        if (from instanceof PhantomEvent) {
-            edge_encoding_map_to_use = edges_to_encode_with_phantom_start;
-        } else if (to instanceof PhantomEvent phantom) {
-            edge_encoding_map_to_use = edges_to_encode_with_phantom_end;
-            final var edge_list = edge_keys_for_phantom_end_edges.computeIfAbsent(phantom, p -> new ArrayList<>());
+        if (from instanceof PhantomEvent phantom_start && to instanceof PhantomEvent) {
+            edge_encoding_map_to_use = edges_to_encode_with_both_phantom;
+            final var edge_list = edge_keys_for_phantom_start_edges.computeIfAbsent(phantom_start, p -> new ArrayList<>());
             edge_list.add(edge_key);
+        } else if (from instanceof PhantomEvent phantom) {
+            edge_encoding_map_to_use = edges_to_encode_with_phantom_start;
+            final var edge_list = edge_keys_for_phantom_start_edges.computeIfAbsent(phantom, p -> new ArrayList<>());
+            edge_list.add(edge_key);
+        } else if (to instanceof PhantomEvent) {
+            edge_encoding_map_to_use = edges_to_encode_with_phantom_end;
         } else {
             edge_encoding_map_to_use = edges_to_encode;
         }
@@ -245,18 +296,17 @@ public class DataDependencyChunkAnalysis {
         for (Register register : writers.getUsedRegisters()) {
             final var may_writers = writers.ofRegister(register).getMayWriters();
             final var addr_link_kind = addr_link_map.getOrDefault(register, AddrLinkKind.NONE);
-
             var new_sink = sink;
+            var new_path_link_kind = path_link_kind.add(addr_link_kind);
+            var new_accumulated_condition = accumulated_condition;
 
             final var existing_phantom = phantom_event_map.get(may_writers);
             if (existing_phantom != null) {
-                assert current_node != sink;
-                recordEdge(existing_phantom, sink, accumulated_condition, path_link_kind);
+                recordEdge(existing_phantom, sink, accumulated_condition, new_path_link_kind);
                 continue;
             }
 
             final var phantom_needed = may_writers.size() > PHANTOM_NODE_BOUND
-                    && current_node != sink
                     && !registers_with_phantom_events.contains(register)
                     && ((BackwardsReachingDefinitionsAnalysis) definitions).getReaders(may_writers.get(may_writers.size() - 1)).getReaders().size() > PHANTOM_NODE_BOUND;
 
@@ -264,8 +314,10 @@ public class DataDependencyChunkAnalysis {
                 registers_with_phantom_events.add(register);
                 final var phantom = PhantomEvent.create();
                 phantom_event_map.put(may_writers, phantom);
-                recordEdge(phantom, sink, accumulated_condition, path_link_kind);
+                recordEdge(phantom, sink, accumulated_condition, new_path_link_kind);
                 new_sink = phantom;
+                new_path_link_kind = AddrLinkKind.NONE;
+                new_accumulated_condition = PathCondition.from_size(event_count);
             }
 
             for (int writer_index = may_writers.size() - 1; writer_index >= 0; writer_index--) {
@@ -281,19 +333,19 @@ public class DataDependencyChunkAnalysis {
                 final var is_chunk_border = isChunkBorder(possible_border);
 
                 if (is_chunk_border) {
-                    recordEdge(possible_border, new_sink, accumulated_condition, path_link_kind.add(addr_link_kind));
-                    addEvent(accumulated_condition.forbidden(), writer);
+                    recordEdge(possible_border, new_sink, new_accumulated_condition, new_path_link_kind);
+                    addEvent(new_accumulated_condition.forbidden(), writer);
                     continue;
                 }
 
-                if (!is_conditionally_must) addEvent(accumulated_condition.required(), writer);
+                if (!is_conditionally_must) addEvent(new_accumulated_condition.required(), writer);
 
                 if (possible_border instanceof RegReader reader) {
-                    addDependencyEdge(reader, new_sink, accumulated_condition, path_link_kind.add(addr_link_kind));
+                    addDependencyEdge(reader, new_sink, new_accumulated_condition, new_path_link_kind);
                 }
 
-                addEvent(accumulated_condition.forbidden(), writer);
-                if (!is_conditionally_must) removeEvent(accumulated_condition.required(), writer);
+                addEvent(new_accumulated_condition.forbidden(), writer);
+                if (!is_conditionally_must) removeEvent(new_accumulated_condition.required(), writer);
             }
 
             accumulated_condition.forbidden().and(forbidden_up_unitil_here);

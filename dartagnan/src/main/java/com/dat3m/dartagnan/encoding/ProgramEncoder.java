@@ -737,27 +737,27 @@ public class ProgramEncoder {
 
             final var first_link = bmgr.makeVariable("link_" + from.getGlobalId() + "_phantom" + info.phantoms().get(0).generation());
             link_variables.add(first_link);
-            enc.add(bmgr.equivalence(first_link, bmgr.or(getPathConditionEncodings(info.link_infos().get(0).conditions(), thread))));
+            enc.add(bmgr.equivalence(first_link, getPathConditionEncodings(info.link_infos().get(0).conditions(), thread)));
 
-            for (int i = 1; i < info.phantoms().size() - 1; i++) {
+            for (int i = 1; i < info.phantoms().size(); i++) {
                 final var from_phantom = info.phantoms().get(i);
                 final var to_phantom = info.phantoms().get(i + 1);
                 final var link = bmgr.makeVariable("link_phantom" + from_phantom.generation() + "_phantom" + to_phantom.generation());
                 link_variables.add(link);
-                enc.add(bmgr.equivalence(link, bmgr.or(getPathConditionEncodings(info.link_infos().get(i).conditions(), thread))));
+                enc.add(bmgr.equivalence(link, getPathConditionEncodings(info.link_infos().get(i).conditions(), thread)));
             }
 
             final var last_link = bmgr.makeVariable("link_phantom" + info.phantoms().get(info.phantoms().size() - 1).generation() + "_" + to.getGlobalId());
             link_variables.add(last_link);
-            enc.add(bmgr.equivalence(last_link, bmgr.or(getPathConditionEncodings(info.link_infos().get(info.link_infos().size() - 1).conditions(), thread))));
+            enc.add(bmgr.equivalence(last_link, getPathConditionEncodings(info.link_infos().get(info.link_infos().size() - 1).conditions(), thread)));
 
-            enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(link_variables)));
+            enc.add(bmgr.equivalence(context.dependency(from, to), bmgr.and(context.execution(from), context.controlFlow(to), bmgr.and(link_variables))));
         });
 
         return bmgr.and(enc);
     }
 
-    private List<BooleanFormula> getPathConditionEncodings(List<PathCondition> conditions, Thread thread) {
+    private BooleanFormula getPathConditionEncodings(List<PathCondition> conditions, Thread thread) {
         final List<BooleanFormula> path_encodings = new ArrayList<>();
         for (var path_condition : conditions) {
             final List<BooleanFormula> path_cond_formulas = new ArrayList<>(chunkAnalysis.eventStreamOfSet(path_condition.required(), thread).map(context::execution).toList());
@@ -765,7 +765,7 @@ public class ProgramEncoder {
             path_cond_formulas.add(bmgr.not(bmgr.or(forbidden)));
             path_encodings.add(bmgr.and(path_cond_formulas));
         }
-        return path_encodings;
+        return path_encodings.isEmpty() ? bmgr.makeTrue() : bmgr.or(path_encodings);
     }
 
     public BooleanFormula encodeDataDependenciesOld() {
