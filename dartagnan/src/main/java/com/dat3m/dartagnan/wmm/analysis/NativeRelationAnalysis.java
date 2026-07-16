@@ -42,6 +42,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static com.dat3m.dartagnan.program.Register.UsageType.*;
 import static com.dat3m.dartagnan.program.event.Tag.*;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -1017,7 +1018,7 @@ public class NativeRelationAnalysis implements RelationAnalysis {
 
             // We need to track ExecutionStatus events separately, because they induce data-dependencies
             // without reading from a register.
-            if (usageTypes.contains(UsageType.DATA)) {
+            if (usageTypes.contains(DATA)) {
                 for (ExecutionStatus execStatus : program.getThreadEvents(ExecutionStatus.class)) {
                     if (execStatus.doesTrackDep()) {
                         may.add(execStatus.getStatusEvent(), execStatus);
