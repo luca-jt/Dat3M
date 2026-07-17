@@ -587,7 +587,7 @@ public class ProgramEncoder {
                         if (initializeRegisters && !reg.mustBeInitialized()) {
                             ite = exprs.makeGeneralZero(register.getType());
                         } else {
-                            ite = exprEnc.makeVariable("ITE_unconstrained_" + reader_signature_formulas.size(), register.getType()); // TODO: resuse phi as unconstrained because x=x has infinite solutions
+                            ite = phi_var;
                         }
 
                         for (RegWriter writer : may_writers) { // we put the existing formula in the else block, so no reverse order iteration
