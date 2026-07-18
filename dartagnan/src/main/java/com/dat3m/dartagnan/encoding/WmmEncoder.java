@@ -725,7 +725,7 @@ public class WmmEncoder {
             final EncodingContext.EdgeEncoder edge = context.edge(rf);
             final EncodingUtils utils = context.getFormulaManager().getEncodingUtils();
 
-            final Map<MemoryEvent, List<BooleanFormula>> read2RfEdges = new LinkedHashMap<>();
+            final Map<MemoryEvent, List<BooleanFormula>> read2RfEdges = new HashMap<>();
             // Encode the semantics of rf-edges
             ra.getKnowledge(rf).getMaySet().apply((e1, e2) -> {
                 final MemoryCoreEvent w = (MemoryCoreEvent) e1;
