@@ -174,7 +174,7 @@ public class DependencyGraph<T> {
             }
 
             if (v.lowlink == v.index) {
-                final Set<Node> scc = new HashSet<>();
+                final Set<Node> scc = new LinkedHashSet<>();
                 sccs.add(scc);
                 v.topologicalIndex = ++topIndex;
                 Node w;

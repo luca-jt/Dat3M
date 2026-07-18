@@ -24,6 +24,7 @@ import com.dat3m.dartagnan.wmm.analysis.DataDependencyChunkAnalysis;
 import com.dat3m.dartagnan.wmm.analysis.RelationAnalysis;
 import com.dat3m.dartagnan.wmm.analysis.RelationEventDomains;
 import com.dat3m.dartagnan.wmm.analysis.WmmAnalysis;
+import com.dat3m.dartagnan.wmm.axiom.Axiom;
 import com.dat3m.dartagnan.wmm.processing.WmmProcessingManager;
 
 import com.google.common.base.Preconditions;
@@ -34,6 +35,8 @@ import org.sosy_lab.common.configuration.*;
 import org.sosy_lab.java_smt.SolverContextFactory;
 import org.sosy_lab.java_smt.api.SolverContext;
 import org.sosy_lab.java_smt.api.SolverException;
+
+import java.util.List;
 
 import static com.dat3m.dartagnan.configuration.OptionNames.*;
 import static com.dat3m.dartagnan.smt.SMTHelper.createSolverContext;
@@ -162,7 +165,6 @@ public abstract class ModelChecker implements AutoCloseable {
 
     // ====================================== Processing utility ==================================================
 
-
     public static void preprocessProgram(VerificationTask task, Configuration config) throws InvalidConfigurationException {
         Program program = task.getProgram();
         ProcessingManager.fromConfig(config).run(program);
@@ -170,6 +172,13 @@ public abstract class ModelChecker implements AutoCloseable {
 
     public static void preprocessMemoryModel(VerificationTask task, Configuration config) throws InvalidConfigurationException{
         final Wmm memoryModel = task.getMemoryModel();
+
+        // We remove flagged axioms if we do not check for them.
+        if (!task.getProperty().contains(Property.CAT_SPEC)) {
+            List.copyOf(task.getMemoryModel().getAxioms()).stream()
+                    .filter(Axiom::isFlagged)
+                    .forEach(task.getMemoryModel()::removeConstraint);
+        }
         WmmProcessingManager.fromConfig(config).run(memoryModel);
     }
 

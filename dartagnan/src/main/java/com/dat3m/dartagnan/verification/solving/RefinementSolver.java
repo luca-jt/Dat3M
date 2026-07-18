@@ -163,11 +163,6 @@ public class RefinementSolver extends ModelChecker {
         final Configuration config = task.getConfig();
         final Wmm memoryModel = task.getMemoryModel();
 
-        // TODO: This is a reasonable transformation for all methods (eager/lazy), however,
-        //  our current processing pipelines (WmmProcessor/ProgramProcessor) are unaware of the property
-        //  so we cannot perform property-aware transformation in those pipelines right now.
-        removeFlaggedAxiomsIfNotNeeded(task);
-
         preprocessProgram(task, config);
         preprocessMemoryModel(task, config);
         instrumentPolaritySeparation(memoryModel);
@@ -193,7 +188,7 @@ public class RefinementSolver extends ModelChecker {
         performIntervalAnalysis(task, analysisContext, config);
 
         //  ------- Generate refinement model -------
-        final Collection<Constraint> wmmConstraintsToEncode = new HashSet<>(biases);
+        final Collection<Constraint> wmmConstraintsToEncode = new LinkedHashSet<>(biases);
         // The cut has to be encoded.
         wmmConstraintsToEncode.addAll(generateCut(memoryModel));
 
@@ -489,7 +484,7 @@ public class RefinementSolver extends ModelChecker {
         // We cut (i) negated axioms, (ii) negated relations (if derived),
         // and (iii) some special relations because they are derived from internal relations (like data/addr/ctrl)
         // or because we have no dedicated implementation for them in CAAT (like Linux' rscs).
-        final Set<Constraint> constraintsToCut = new HashSet<>();
+        final Set<Constraint> constraintsToCut = new LinkedHashSet<>();
         for (Constraint c : model.getConstraints()) {
             if (c instanceof Axiom ax && ax.isNegated()) {
                 // (i) Negated axioms
@@ -573,15 +568,6 @@ public class RefinementSolver extends ModelChecker {
         }
         constraints.forEach(wmm::addConstraint);
         return constraints;
-    }
-
-    private static void removeFlaggedAxiomsIfNotNeeded(VerificationTask task) {
-        // We remove flagged axioms if we do not check for them.
-        if (!task.getProperty().contains(Property.CAT_SPEC)) {
-            List.copyOf(task.getMemoryModel().getAxioms()).stream()
-                    .filter(Axiom::isFlagged)
-                    .forEach(task.getMemoryModel()::removeConstraint);
-        }
     }
 
     /*

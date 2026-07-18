@@ -89,6 +89,11 @@ public class BranchReordering implements FunctionProcessor {
 
                 return id == ((MovableBranch)obj).id;
             }
+
+            @Override
+            public String toString() {
+                return "B" + id;
+            }
         }
 
         private final Function function;
@@ -131,7 +136,7 @@ public class BranchReordering implements FunctionProcessor {
             // Construct successor map of branches
             final Map<MovableBranch, Set<MovableBranch>> successorMap = new HashMap<>();
             for (MovableBranch b : movables) {
-                successorMap.put(b, new HashSet<>());
+                successorMap.put(b, new LinkedHashSet<>());
             }
             for (MovableBranch branch : movables) {
                 for (Event e : branch.events) {
@@ -156,6 +161,12 @@ public class BranchReordering implements FunctionProcessor {
             }
 
             return reorderedBranches;
+        }
+
+        private <T> void swap(List<T> list, int i, int j) {
+            T tmp = list.get(i);
+            list.set(i, list.get(j));
+            list.set(j, tmp);
         }
 
         public void run() {
