@@ -616,7 +616,7 @@ public class ProgramEncoder {
         List<BooleanFormula> enc = new ArrayList<>();
         final Map<Pair<Event, RegReader>, BooleanFormula> known_link_encodings = new HashMap<>();
 
-        chunkAnalysis.getFullEdgesToEncode().forEach(edge_entry -> {
+        chunkAnalysis.getFullEdgesToEncode().filter(e -> e.getValue().stream().noneMatch(DataDependencyChunkAnalysis.EncodingInfo::is_must)).forEach(edge_entry -> {
             final var from = edge_entry.getKey().getLeft();
             final var to = edge_entry.getKey().getRight();
             final var condition_formula = bmgr.or(edge_entry.getValue().stream().map(i -> getEncodingInfoEncoding(i, from, to, enc, known_link_encodings)).toList());

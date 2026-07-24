@@ -45,13 +45,25 @@ public class DataDependencyChunkAnalysis {
     private final Map<PhantomEvent, Set<Pair<Event, RegReader>>> edge_keys_for_phantom_start_edges;
     private final Map<Pair<Event, RegReader>, List<EncodingInfo>> final_edges;
 
-    public interface EncodingInfo {}
+    public interface EncodingInfo {
+        boolean is_must();
+    }
 
-    public record EdgeEncodingInfo(List<PathCondition> conditions, AddrLinkKind addr_kind) implements EncodingInfo {}
+    public record EdgeEncodingInfo(List<PathCondition> conditions, AddrLinkKind addr_kind) implements EncodingInfo {
+        @Override
+        public boolean is_must() {
+            return conditions().isEmpty();
+        }
+    }
 
     public record LinkedEdgeEncodingInfo(List<EdgeEncodingInfo> link_infos, List<PhantomEvent> phantoms) implements EncodingInfo {
         static LinkedEdgeEncodingInfo clone(LinkedEdgeEncodingInfo other) {
             return new LinkedEdgeEncodingInfo(new ArrayList<>(other.link_infos()), new ArrayList<>(other.phantoms()));
+        }
+
+        @Override
+        public boolean is_must() {
+            return false;
         }
     }
 
@@ -215,13 +227,7 @@ public class DataDependencyChunkAnalysis {
             analysis_ran = true;
         }
         return final_edges.entrySet().stream().map(e -> {
-            var is_must = false;
-            for (var it : e.getValue()) {
-                if (it instanceof EdgeEncodingInfo info && info.conditions().isEmpty()) {
-                    is_must = true;
-                    break;
-                }
-            }
+            final var is_must = e.getValue().stream().anyMatch(EncodingInfo::is_must);
             final var link_kind = e.getValue().stream().map(i -> i instanceof EdgeEncodingInfo info ? info.addr_kind() : ((LinkedEdgeEncodingInfo) i).link_infos().stream().map(EdgeEncodingInfo::addr_kind).reduce(AddrLinkKind.NONE, AddrLinkKind::add)).reduce(AddrLinkKind::merge);
             assert link_kind.isPresent();
             return Pair.of(e.getKey(), new EdgeInfo(is_must, link_kind.get()));
@@ -305,7 +311,10 @@ public class DataDependencyChunkAnalysis {
 
         final ReachingDefinitionsAnalysis.Writers writers = definitions.getWriters(current_node);
         for (Register register : writers.getUsedRegisters()) {
-            final var may_writers = writers.ofRegister(register).getMayWriters();
+            final var reg_writers = writers.ofRegister(register);
+            final var may_writers = reg_writers.getMayWriters();
+            final var must_writers = reg_writers.getMustWriters();
+
             final var addr_link_kind = addr_link_map.getOrDefault(register, AddrLinkKind.NONE);
             var new_sink = sink;
             var new_path_link_kind = path_link_kind.add(addr_link_kind);
@@ -333,6 +342,8 @@ public class DataDependencyChunkAnalysis {
 
             for (int writer_index = may_writers.size() - 1; writer_index >= 0; writer_index--) {
                 final var writer = may_writers.get(writer_index);
+                final var is_structurally_must = must_writers.contains(writer);
+                var recurse_acc_condition = new_accumulated_condition;
 
                 Event possible_border = writer; // status events are always writers tagged with MEMORY and are chunk borders
                 if (writer instanceof ExecutionStatus status && status.doesTrackDep()) {
@@ -340,19 +351,26 @@ public class DataDependencyChunkAnalysis {
                 }
 
                 final var is_conditionally_must = exec.isImplied(current_node, writer);
-
                 final var is_chunk_border = isChunkBorder(possible_border);
 
                 if (is_chunk_border) {
-                    recordEdge(possible_border, new_sink, new_accumulated_condition, new_path_link_kind);
+                    if (is_structurally_must) {
+                        recurse_acc_condition = new PathCondition(new_accumulated_condition);
+                        recurse_acc_condition.forbidden().and(forbidden_up_unitil_here);
+                    }
+                    recordEdge(possible_border, new_sink, recurse_acc_condition, new_path_link_kind);
                     addEvent(new_accumulated_condition.forbidden(), writer);
                     continue;
                 }
 
                 if (!is_conditionally_must) addEvent(new_accumulated_condition.required(), writer);
+                if (is_structurally_must) {
+                    recurse_acc_condition = new PathCondition(new_accumulated_condition);
+                    recurse_acc_condition.forbidden().and(forbidden_up_unitil_here);
+                }
 
                 if (possible_border instanceof RegReader reader) {
-                    addDependencyEdge(reader, new_sink, new_accumulated_condition, new_path_link_kind);
+                    addDependencyEdge(reader, new_sink, recurse_acc_condition, new_path_link_kind);
                 }
 
                 addEvent(new_accumulated_condition.forbidden(), writer);
