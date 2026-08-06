@@ -94,6 +94,7 @@ public final class IndexedSet<E> extends AbstractSet<E> {
         if (member == null) {
             return loneMember == -1 ? new int[0] : new int[]{loneMember};
         }
+        //if (elements.length == 0) return new int[0];
         final var buffer = new int[elements.length];
         int bufferpointer = 0;
         for (int pageindex = 0; pageindex < member.length; pageindex++) {

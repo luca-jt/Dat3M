@@ -599,18 +599,6 @@ public class WmmEncoder {
                 if (!(reader instanceof RegReader rr && chunkAnalysis.edgeExists(writer, rr))) {
                     enc.add(bmgr.not(edge.encode(writer, reader)));
                 }
-                /// this would catch StatusEvent->ExecutionStatus edges in the former encoding (thomas comment on what edges come here)
-                /*if (!(writer instanceof RegWriter wr) || !(reader instanceof RegReader rr)) {
-                    enc.add(bmgr.not(edge.encode(writer, reader)));
-                } else {
-                    final ReachingDefinitionsAnalysis.RegisterWriters state = definitions.getWriters(rr)
-                            .ofRegister(wr.getResultRegister());
-                    if (state.getMustWriters().contains(writer)) {
-                        enc.add(bmgr.equivalence(edge.encode(writer, reader), context.execution(writer, reader)));
-                    } else if (!state.getMayWriters().contains(writer)) {
-                        //enc.add(bmgr.not(edge.encode(writer, reader)));
-                    }
-                }*/
             });
             return null;
         }

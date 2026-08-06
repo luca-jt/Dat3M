@@ -623,12 +623,6 @@ public class NativeRelationAnalysis implements RelationAnalysis {
                 final var to = edge_entry.getKey().getRight();
                 may.add(from, to);
                 if (is_must) must.add(from, to);
-
-                /*if (is_must) {
-                    logger.info("{} MUST: {} -> {}", edge_entry.getValue().addr_kind(), from, to);
-                } else {
-                    logger.info("{} MAY-ONLY: {} -> {}", edge_entry.getValue().addr_kind(), from, to);
-                }*/
             });
 
             return new MutableKnowledge(may, must);
