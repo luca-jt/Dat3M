@@ -114,7 +114,6 @@ public class DataDependencyChunkAnalysis {
         logger.info("Begin of DataDependencyAnalysis");
 
         final var thread_list = task.getProgram().getThreads();
-        if (thread_list.stream().filter(t -> !t.getName().startsWith("Init_")).count() < 2) return;
 
         final Map<com.dat3m.dartagnan.program.Thread, List<Event>> thread_condition_events = new HashMap<>(thread_list.size());
         final Map<com.dat3m.dartagnan.program.Thread, List<RegReader>> thread_sink_events = new HashMap<>(thread_list.size());

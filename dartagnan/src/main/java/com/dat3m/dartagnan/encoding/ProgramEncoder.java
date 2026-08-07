@@ -512,8 +512,7 @@ public class ProgramEncoder {
     public BooleanFormula encodeDataFlow() {
         logger.info("Encoding data flow.");
 
-        var dependencies_are_relevant = context.getTask().getMemoryModel().containsRelation(RelationNameRepository.IDD)
-                && context.getTask().getProgram().getThreads().stream().filter(t -> !t.getName().startsWith("Init_")).count() > 1;
+        var dependencies_are_relevant = context.getTask().getMemoryModel().containsRelation(RelationNameRepository.IDD);
 
         final BooleanFormula data_value_formula = encodeDataValuesOnlyRightExpressionWithPhi();
 
